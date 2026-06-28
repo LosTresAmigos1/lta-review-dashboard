@@ -1,0 +1,71 @@
+name: Update Reviews
+
+on:
+  schedule:
+    - cron: '0 */4 * * *'   # every 4 hours
+  workflow_dispatch:          # manual trigger from GitHub UI
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: pip install playwright
+
+      - name: Install Playwright browsers
+        run: playwright install chromium --with-deps
+
+      - name: Run scraper
+        id: scrape
+        run: python auto_update.py
+
+      - name: Commit updated reviews
+        if: steps.scrape.outputs.new_count != '0' && steps.scrape.outputs.new_count != ''
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add dashboard/reviews.csv
+          git diff --staged --quiet || git commit -m "chore: add ${{ steps.scrape.outputs.new_count }} new reviews [skip ci]"
+          git push
+
+      - name: Set up Node
+        if: steps.scrape.outputs.new_count != '0' && steps.scrape.outputs.new_count != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Deploy to Vercel
+        if: steps.scrape.outputs.new_count != '0' && steps.scrape.outputs.new_count != ''
+        run: |
+          cd dashboard
+          npm ci
+          npm run build
+          npx vercel --prod --yes --token=${{ secrets.VERCEL_TOKEN }}
+        env:
+          VERCEL_ORG_ID: team_mDA28eSShEIgPIQlduF4GJVH
+          VERCEL_PROJECT_ID: prj_8Lj4p2UgPOVVwEZoRuuEpKy9L5gp
+
+      - name: Send email notification
+        if: steps.scrape.outputs.new_count != '0' && steps.scrape.outputs.new_count != ''
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.GMAIL_USER }}
+          password: ${{ secrets.GMAIL_APP_PASSWORD }}
+          subject: "${{ steps.scrape.outputs.new_count }} new reviews – LTA Dashboard"
+          to: advertising@l3amigos.com
+          from: "LTA Review Dashboard <${{ secrets.GMAIL_USER }}>"
+          html_body: ${{ steps.scrape.outputs.email_html }}

@@ -1,0 +1,26 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  *, *::before, *::after { box-sizing: border-box; }
+  body {
+    @apply bg-stone-50 text-stone-800 font-sans antialiased;
+  }
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-amber-500;
+  }
+}
+
+@layer utilities {
+  .low-confidence {
+    opacity: 0.45;
+    background-image: repeating-linear-gradient(
+      45deg,
+      transparent,
+      transparent 4px,
+      rgba(0,0,0,.08) 4px,
+      rgba(0,0,0,.08) 8px
+    );
+  }
+}
