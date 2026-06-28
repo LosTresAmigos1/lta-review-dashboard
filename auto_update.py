@@ -16,7 +16,8 @@ BASE_DIR = Path(__file__).parent
 REVIEWS_CSV = BASE_DIR / "dashboard" / "reviews.csv"
 GITHUB_OUTPUT = os.environ.get("GITHUB_OUTPUT", "")
 
-MAX_REVIEWS = 200  # only recent reviews needed for new-review detection
+LOCAL_MODE = "--local" in sys.argv  # headed browser, more reviews, git push + vercel deploy
+MAX_REVIEWS = 500 if LOCAL_MODE else 200
 
 LOCATIONS = [
     {"name": "Los Tres Amigos Livonia",         "city": "Livonia",         "search": "Los Tres Amigos 29441 Five Mile Rd Livonia MI"},
@@ -378,7 +379,7 @@ async def main():
 
     all_scraped = []
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(headless=not LOCAL_MODE)
         context = await browser.new_context(
             viewport={"width": 1280, "height": 900},
             locale="en-US",
@@ -414,6 +415,16 @@ async def main():
         write_github_output(len(new_rows), email_html)
     else:
         write_github_output(0, "")
+
+    if LOCAL_MODE:
+        import subprocess
+        print("\nPushing to GitHub...")
+        subprocess.run("git add dashboard/reviews.csv", shell=True, cwd=BASE_DIR)
+        msg = f"update: {len(new_rows)} new reviews" if new_rows else "update: no new reviews"
+        subprocess.run(f'git commit -m "{msg}"', shell=True, cwd=BASE_DIR)
+        subprocess.run("git push", shell=True, cwd=BASE_DIR)
+        print("\nDeploying to Vercel...")
+        subprocess.run("vercel --prod --yes", shell=True, cwd=BASE_DIR / "dashboard")
 
 
 if __name__ == "__main__":
