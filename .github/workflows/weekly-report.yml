@@ -1,0 +1,22 @@
+name: Weekly Review Report
+
+on:
+  schedule:
+    - cron: '0 13 * * 1'   # Every Monday at 8am EST (13:00 UTC)
+  workflow_dispatch:         # manual trigger
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Send weekly report
+        run: python weekly_report.py
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}

@@ -5,9 +5,10 @@ const TABS = [
   { id: 'locations',  label: 'Locations'        },
   { id: 'explorer',   label: 'Review Explorer'  },
   { id: 'rankings',   label: 'Rankings'         },
+  { id: 'actions',    label: 'Action Items'     },
 ]
 
-export default function Layout({ page, onPage, dataWindow, allReviews, children }) {
+export default function Layout({ page, onPage, dataWindow, allReviews, unansweredCount, children }) {
   return (
     <div className="min-h-screen flex flex-col">
       {/* Header */}
@@ -36,13 +37,18 @@ export default function Layout({ page, onPage, dataWindow, allReviews, children 
                   role="tab"
                   aria-selected={page === t.id}
                   onClick={() => onPage(t.id)}
-                  className={`px-4 py-2.5 text-sm font-medium whitespace-nowrap border-b-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 ${
+                  className={`relative px-4 py-2.5 text-sm font-medium whitespace-nowrap border-b-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 ${
                     page === t.id
                       ? 'border-amber-400 text-white'
                       : 'border-transparent text-stone-400 hover:text-stone-200 hover:border-stone-500'
                   }`}
                 >
                   {t.label}
+                  {t.id === 'actions' && unansweredCount > 0 && (
+                    <span className="absolute -top-0.5 -right-0.5 bg-red-500 text-white text-[9px] font-bold rounded-full min-w-[16px] h-[16px] flex items-center justify-center px-1">
+                      {unansweredCount > 99 ? '99+' : unansweredCount}
+                    </span>
+                  )}
                 </button>
               </li>
             ))}

@@ -6,6 +6,7 @@ import Overview      from './pages/Overview.jsx'
 import LocationDetail from './pages/LocationDetail.jsx'
 import ReviewExplorer from './pages/ReviewExplorer.jsx'
 import Rankings      from './pages/Rankings.jsx'
+import ActionItems, { useUnansweredCount } from './pages/ActionItems.jsx'
 import {
   filterReviews, getDefaultDateRange, getDateBounds, ymLabel,
 } from './utils/dataUtils.js'
@@ -56,23 +57,29 @@ export default function App() {
     return `${filters.start} — ${filters.end}`
   }, [filters.start, filters.end])
 
-  return (
-    <Layout page={page} onPage={setPage} dataWindow={dataWindow} allReviews={allReviews}>
-      <div className="mb-6">
-        <GlobalFilters allReviews={allReviews} filters={filters} onChange={setFilters} />
-      </div>
+  const unansweredCount = useUnansweredCount(allReviews)
 
-      <div className="mb-4 flex items-center gap-2">
-        <span className="text-xs text-stone-400">Period:</span>
-        <span className="text-xs font-medium text-stone-600 bg-stone-100 px-2 py-0.5 rounded-full">{periodLabel}</span>
-        <span className="text-xs text-stone-400">·</span>
-        <span className="text-xs text-stone-500">{filtered.length.toLocaleString()} reviews</span>
-      </div>
+  return (
+    <Layout page={page} onPage={setPage} dataWindow={dataWindow} allReviews={allReviews} unansweredCount={unansweredCount}>
+      {page !== 'actions' && (
+        <>
+          <div className="mb-6">
+            <GlobalFilters allReviews={allReviews} filters={filters} onChange={setFilters} />
+          </div>
+          <div className="mb-4 flex items-center gap-2">
+            <span className="text-xs text-stone-400">Period:</span>
+            <span className="text-xs font-medium text-stone-600 bg-stone-100 px-2 py-0.5 rounded-full">{periodLabel}</span>
+            <span className="text-xs text-stone-400">·</span>
+            <span className="text-xs text-stone-500">{filtered.length.toLocaleString()} reviews</span>
+          </div>
+        </>
+      )}
 
       {page === 'overview'  && <Overview       allReviews={allReviews} filtered={filtered} />}
       {page === 'locations' && <LocationDetail allReviews={allReviews} filtered={filtered} />}
       {page === 'explorer'  && <ReviewExplorer allReviews={allReviews} filtered={filtered} />}
       {page === 'rankings'  && <Rankings       allReviews={allReviews} filtered={filtered} prevFiltered={prevFiltered} />}
+      {page === 'actions'   && <ActionItems    allReviews={allReviews} />}
     </Layout>
   )
 }
