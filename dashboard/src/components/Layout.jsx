@@ -1,3 +1,5 @@
+import NewReviewsPanel from './NewReviewsPanel.jsx'
+
 const TABS = [
   { id: 'overview',   label: 'Overview'         },
   { id: 'locations',  label: 'Locations'        },
@@ -5,7 +7,7 @@ const TABS = [
   { id: 'rankings',   label: 'Rankings'         },
 ]
 
-export default function Layout({ page, onPage, dataWindow, children }) {
+export default function Layout({ page, onPage, dataWindow, allReviews, children }) {
   return (
     <div className="min-h-screen flex flex-col">
       {/* Header */}
@@ -15,11 +17,14 @@ export default function Layout({ page, onPage, dataWindow, children }) {
             <p className="text-xs font-semibold tracking-widest text-amber-400 uppercase">Future Marketing Studio</p>
             <h1 className="text-xl font-bold tracking-tight">Review Intelligence</h1>
           </div>
-          {dataWindow && (
-            <p className="text-xs text-stone-400">
-              Data window: <span className="text-stone-200">{dataWindow}</span>
-            </p>
-          )}
+          <div className="flex items-center gap-4">
+            <NewReviewsPanel allReviews={allReviews} />
+            {dataWindow && (
+              <p className="text-xs text-stone-400">
+                Data window: <span className="text-stone-200">{dataWindow}</span>
+              </p>
+            )}
+          </div>
         </div>
 
         {/* Nav */}

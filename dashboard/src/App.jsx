@@ -57,7 +57,7 @@ export default function App() {
   }, [filters.start, filters.end])
 
   return (
-    <Layout page={page} onPage={setPage} dataWindow={dataWindow}>
+    <Layout page={page} onPage={setPage} dataWindow={dataWindow} allReviews={allReviews}>
       <div className="mb-6">
         <GlobalFilters allReviews={allReviews} filters={filters} onChange={setFilters} />
       </div>
