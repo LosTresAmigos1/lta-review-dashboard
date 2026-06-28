@@ -107,22 +107,25 @@ function UnansweredReviews({ allReviews }) {
 // ── Section 2: Rating trend alerts ─────────────────────────────────────────────
 function TrendAlerts({ allReviews }) {
   const alerts = useMemo(() => {
-    const today   = new Date().toISOString().slice(0, 10)
-    const d30     = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10)
-    const d60     = new Date(Date.now() - 60 * 86400000).toISOString().slice(0, 10)
+    const today = new Date().toISOString().slice(0, 10)
+    const d30   = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10)
+    const d60   = new Date(Date.now() - 60 * 86400000).toISOString().slice(0, 10)
 
     const locs = [...new Set(allReviews.map(r => r.location_name))]
     return locs.map(loc => {
-      const recent = allReviews.filter(r => r.location_name === loc && r.review_date >= d30 && r.review_date <= today)
-      const prev   = allReviews.filter(r => r.location_name === loc && r.review_date >= d60 && r.review_date < d30)
-      if (recent.length < 3 || prev.length < 3) return null
+      const all    = allReviews.filter(r => r.location_name === loc)
+      const recent = all.filter(r => r.review_date >= d30 && r.review_date <= today)
+      const prev   = all.filter(r => r.review_date >= d60 && r.review_date < d30)
+      if (recent.length < 5 || prev.length < 5) return null
 
-      const recentAvg = recent.reduce((s, r) => s + Number(r.star_rating), 0) / recent.length
-      const prevAvg   = prev.reduce((s, r) => s + Number(r.star_rating), 0) / prev.length
-      const delta     = recentAvg - prevAvg
+      const avg = arr => arr.reduce((s, r) => s + Number(r.star_rating), 0) / arr.length
+      const recentAvg  = avg(recent)
+      const prevAvg    = avg(prev)
+      const lifetimeAvg = avg(all)
+      const delta      = recentAvg - prevAvg
 
-      if (Math.abs(delta) < 0.15) return null
-      return { loc, recentAvg, prevAvg, delta, recentCount: recent.length }
+      if (Math.abs(delta) < 0.2) return null
+      return { loc, recentAvg, prevAvg, lifetimeAvg, delta, recentCount: recent.length, prevCount: prev.length }
     })
     .filter(Boolean)
     .sort((a, b) => a.delta - b.delta)
@@ -133,64 +136,74 @@ function TrendAlerts({ allReviews }) {
 
   return (
     <section>
-      <div className="flex items-center gap-3 mb-4">
+      <div className="flex items-center gap-3 mb-2">
         <div className="w-1 h-6 bg-orange-500 rounded-full" />
         <h2 className="text-lg font-bold text-stone-800">Rating Trend Alerts</h2>
-        <span className="text-xs text-stone-400">Last 30 days vs prior 30 days</span>
       </div>
+      <p className="text-sm text-stone-500 mb-4">
+        Compares each location's <strong>average rating for the last 30 days</strong> vs the <strong>30 days before that</strong>.
+        This is NOT the overall Google rating — it highlights recent momentum shifts.
+        Lifetime avg shown for reference.
+      </p>
 
       {alerts.length === 0 ? (
         <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-6 text-center">
-          <p className="text-emerald-700 font-semibold">All locations are stable — no significant rating changes detected.</p>
+          <p className="text-emerald-700 font-semibold">All locations are stable — no significant trend changes detected.</p>
         </div>
       ) : (
         <div className="grid sm:grid-cols-2 gap-3">
           {dropping.map((a, i) => (
             <div key={i} className="bg-red-50 border border-red-200 rounded-xl p-4">
-              <div className="flex items-start justify-between mb-2">
+              <div className="flex items-start justify-between mb-3">
                 <div>
                   <p className="font-semibold text-stone-800 text-sm">{a.loc}</p>
-                  <p className="text-xs text-stone-500">{a.recentCount} reviews in last 30 days</p>
+                  <p className="text-xs text-stone-500 mt-0.5">
+                    Lifetime avg: <strong>{a.lifetimeAvg.toFixed(2)} ★</strong>
+                  </p>
                 </div>
-                <span className="text-red-600 font-bold text-lg">{a.delta.toFixed(2)}</span>
+                <span className="bg-red-100 text-red-700 font-bold text-sm px-2 py-1 rounded-lg">
+                  ▼ {Math.abs(a.delta).toFixed(2)}
+                </span>
               </div>
-              <div className="flex items-center gap-3 text-sm">
-                <div className="text-center">
-                  <p className="text-xs text-stone-400">Before</p>
-                  <p className="font-semibold text-stone-700">{a.prevAvg.toFixed(2)} ★</p>
+              <div className="flex items-center gap-2 bg-white rounded-lg p-3 border border-red-100">
+                <div className="flex-1 text-center">
+                  <p className="text-[10px] text-stone-400 uppercase tracking-wide font-semibold">31–60 days ago</p>
+                  <p className="font-bold text-stone-700 text-lg">{a.prevAvg.toFixed(2)}</p>
+                  <p className="text-[10px] text-stone-400">{a.prevCount} reviews</p>
                 </div>
-                <div className="text-red-400 text-lg">→</div>
-                <div className="text-center">
-                  <p className="text-xs text-stone-400">Now</p>
-                  <p className="font-bold text-red-600">{a.recentAvg.toFixed(2)} ★</p>
-                </div>
-                <div className="ml-auto bg-red-100 text-red-700 text-xs font-bold px-2 py-1 rounded-full">
-                  Dropping
+                <div className="text-red-300 text-xl px-1">→</div>
+                <div className="flex-1 text-center">
+                  <p className="text-[10px] text-stone-400 uppercase tracking-wide font-semibold">Last 30 days</p>
+                  <p className="font-bold text-red-600 text-lg">{a.recentAvg.toFixed(2)}</p>
+                  <p className="text-[10px] text-stone-400">{a.recentCount} reviews</p>
                 </div>
               </div>
             </div>
           ))}
           {improving.map((a, i) => (
             <div key={i} className="bg-emerald-50 border border-emerald-200 rounded-xl p-4">
-              <div className="flex items-start justify-between mb-2">
+              <div className="flex items-start justify-between mb-3">
                 <div>
                   <p className="font-semibold text-stone-800 text-sm">{a.loc}</p>
-                  <p className="text-xs text-stone-500">{a.recentCount} reviews in last 30 days</p>
+                  <p className="text-xs text-stone-500 mt-0.5">
+                    Lifetime avg: <strong>{a.lifetimeAvg.toFixed(2)} ★</strong>
+                  </p>
                 </div>
-                <span className="text-emerald-600 font-bold text-lg">+{a.delta.toFixed(2)}</span>
+                <span className="bg-emerald-100 text-emerald-700 font-bold text-sm px-2 py-1 rounded-lg">
+                  ▲ {a.delta.toFixed(2)}
+                </span>
               </div>
-              <div className="flex items-center gap-3 text-sm">
-                <div className="text-center">
-                  <p className="text-xs text-stone-400">Before</p>
-                  <p className="font-semibold text-stone-700">{a.prevAvg.toFixed(2)} ★</p>
+              <div className="flex items-center gap-2 bg-white rounded-lg p-3 border border-emerald-100">
+                <div className="flex-1 text-center">
+                  <p className="text-[10px] text-stone-400 uppercase tracking-wide font-semibold">31–60 days ago</p>
+                  <p className="font-bold text-stone-700 text-lg">{a.prevAvg.toFixed(2)}</p>
+                  <p className="text-[10px] text-stone-400">{a.prevCount} reviews</p>
                 </div>
-                <div className="text-emerald-400 text-lg">→</div>
-                <div className="text-center">
-                  <p className="text-xs text-stone-400">Now</p>
-                  <p className="font-bold text-emerald-600">{a.recentAvg.toFixed(2)} ★</p>
-                </div>
-                <div className="ml-auto bg-emerald-100 text-emerald-700 text-xs font-bold px-2 py-1 rounded-full">
-                  Improving
+                <div className="text-emerald-300 text-xl px-1">→</div>
+                <div className="flex-1 text-center">
+                  <p className="text-[10px] text-stone-400 uppercase tracking-wide font-semibold">Last 30 days</p>
+                  <p className="font-bold text-emerald-600 text-lg">{a.recentAvg.toFixed(2)}</p>
+                  <p className="text-[10px] text-stone-400">{a.recentCount} reviews</p>
                 </div>
               </div>
             </div>
