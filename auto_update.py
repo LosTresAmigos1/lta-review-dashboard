@@ -426,6 +426,18 @@ async def main():
         print("\nDeploying to Vercel...")
         subprocess.run("vercel --prod --yes", shell=True, cwd=BASE_DIR / "dashboard")
 
+        print("\n")
+        print("=" * 50)
+        if new_rows:
+            from collections import Counter
+            print(f"  RESULT: {len(new_rows)} NEW REVIEWS FOUND")
+            print("-" * 50)
+            for loc_name, cnt in Counter(r["location_name"] for r in new_rows).most_common():
+                print(f"  {cnt:4d}  {loc_name}")
+        else:
+            print("  RESULT: No new reviews since last run.")
+        print("=" * 50)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
