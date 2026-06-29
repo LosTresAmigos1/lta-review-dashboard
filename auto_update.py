@@ -17,7 +17,8 @@ REVIEWS_CSV = BASE_DIR / "dashboard" / "reviews.csv"
 GITHUB_OUTPUT = os.environ.get("GITHUB_OUTPUT", "")
 
 LOCAL_MODE = "--local" in sys.argv  # headed browser, more reviews, git push + vercel deploy
-MAX_REVIEWS = 500 if LOCAL_MODE else 200
+MAX_SCROLL = 3000 if LOCAL_MODE else 300   # max reviews to load per location (3000 covers all locations)
+EXTRACT_EVERY = 50                         # extract from DOM every N new reviews to avoid Chrome GC crash
 
 LOCATIONS = [
     {"name": "Los Tres Amigos Livonia",         "city": "Livonia",         "search": "Los Tres Amigos 29441 Five Mile Rd Livonia MI"},
@@ -91,28 +92,28 @@ async def dismiss_dialogs(page):
             pass
 
 
-async def expand_review_text(page):
+async def extract_from_dom(page, seen_ids: set) -> list:
+    """Extract reviews currently in the DOM, skipping any already in seen_ids."""
+    new_reviews = []
+    els = await page.query_selector_all('[data-review-id]')
+
+    # Expand "See more" buttons for full text before reading
     for sel in ['button[aria-label*="See more"]', 'button.w8nwRe']:
         try:
             btns = await page.query_selector_all(sel)
             for btn in btns:
                 try:
                     await btn.click()
-                    await page.wait_for_timeout(60)
+                    await page.wait_for_timeout(50)
                 except Exception:
                     pass
         except Exception:
             pass
 
-
-async def extract_reviews(page) -> list:
-    reviews = []
-    seen_ids = set()
-    els = await page.query_selector_all('[data-review-id]')
     for el in els:
         try:
             rid = await el.get_attribute("data-review-id") or ""
-            if rid in seen_ids:
+            if not rid or rid in seen_ids:
                 continue
             seen_ids.add(rid)
 
@@ -141,7 +142,6 @@ async def extract_reviews(page) -> list:
                     date_str = (await de.inner_text()).strip()
                     if date_str:
                         break
-            review_date = relative_to_date(date_str)
 
             text = ""
             for sel in ['.MyEned span[jslog]', '.MyEned span:not([jslog])', '.wiI7pd span']:
@@ -160,17 +160,65 @@ async def extract_reviews(page) -> list:
                         break
 
             if name or text:
-                reviews.append({
+                new_reviews.append({
                     "reviewer_name":  name,
                     "star_rating":    stars,
-                    "review_date":    review_date,
+                    "review_date":    relative_to_date(date_str),
                     "review_text":    text,
                     "owner_response": owner_resp,
                     "review_url":     f"https://www.google.com/maps/reviews/{rid}" if rid else "",
                 })
         except Exception:
             pass
-    return reviews
+    return new_reviews
+
+
+async def scroll_and_extract(page, max_reviews: int) -> list:
+    """Scroll the reviews feed and extract in batches to avoid Chrome GC crashes."""
+    feed = None
+    for sel in ['div[role="feed"]', '.m6QErb[role="feed"]', '.DxyBCb']:
+        try:
+            el = await page.query_selector(sel)
+            if el:
+                feed = el
+                break
+        except Exception:
+            pass
+
+    all_reviews = []
+    seen_ids: set = set()
+    prev_dom_count = 0
+    stall = 0
+
+    for _ in range(600):
+        if feed:
+            await feed.evaluate("el => el.scrollTop = el.scrollHeight")
+        else:
+            await page.keyboard.press("End")
+        await page.wait_for_timeout(1100)
+
+        dom_count = len(await page.query_selector_all('[data-review-id]'))
+        new_in_dom = dom_count - len(seen_ids)
+
+        # Extract in batches to free Chrome from holding too many live element refs
+        if new_in_dom >= EXTRACT_EVERY or dom_count >= max_reviews:
+            batch = await extract_from_dom(page, seen_ids)
+            all_reviews.extend(batch)
+
+        if dom_count >= max_reviews:
+            break
+        if dom_count == prev_dom_count:
+            stall += 1
+            if stall >= 5:
+                break
+        else:
+            stall = 0
+        prev_dom_count = dom_count
+
+    # Final extract pass for any remaining unseen reviews
+    final = await extract_from_dom(page, seen_ids)
+    all_reviews.extend(final)
+    return all_reviews
 
 
 async def go_to_reviews_tab(page):
@@ -282,9 +330,7 @@ async def scrape_location(context, loc) -> list:
                 return []
 
         await sort_by_newest(page)
-        await scroll_reviews(page, MAX_REVIEWS)
-        await expand_review_text(page)
-        reviews = await extract_reviews(page)
+        reviews = await scroll_and_extract(page, MAX_SCROLL)
         print(f"    -> {len(reviews)} reviews scraped")
         return reviews
     except Exception as e:
@@ -420,7 +466,8 @@ async def main():
 
     new_rows = []
     for r in all_scraped:
-        key = (r["location_name"], r["reviewer_name"], r["review_date"], r["star_rating"])
+        url = r.get("review_url", "").strip()
+        key = url if url else (r["location_name"], r["reviewer_name"], r["review_date"], r["star_rating"])
         if key not in existing:
             new_rows.append(r)
             existing.add(key)
