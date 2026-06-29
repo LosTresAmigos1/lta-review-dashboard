@@ -111,6 +111,19 @@ def build_html(data):
     if total == 0:
         no_new_block = '<p style="color:#6b7280;font-size:14px">No new reviews were detected in the data this week.</p>'
 
+    loc_heading = "<h3 style='margin:0 0 12px;font-size:14px;font-weight:700;color:#374151'>New Reviews by Location</h3>" if by_loc else ""
+    loc_table   = (
+        '<table style="width:100%;border-collapse:collapse;margin-bottom:24px">'
+        '<thead><tr style="background:#f3f4f6">'
+        '<th style="padding:8px 12px;font-size:12px;text-align:left;color:#6b7280">Location</th>'
+        '<th style="padding:8px 12px;font-size:12px;text-align:center;color:#6b7280">New Reviews</th>'
+        '<th style="padding:8px 12px;font-size:12px;text-align:center;color:#6b7280">30-day avg (vs prior)</th>'
+        f'</tr></thead><tbody>{loc_rows}</tbody></table>'
+    ) if by_loc else ""
+    complaint_heading = "<h3 style='margin:0 0 8px;font-size:14px;font-weight:700;color:#374151'>Top Complaint Keywords This Week</h3>" if complaints else ""
+    complaint_sub     = "<p style='font-size:12px;color:#6b7280;margin:0 0 12px'>Words appearing most in 1-2 star reviews</p>" if complaints else ""
+    complaint_block   = f"<div style='margin-bottom:24px'>{complaint_chips}</div>" if complaints else ""
+
     return f"""<!DOCTYPE html>
 <html>
 <body style="font-family:Arial,sans-serif;max-width:620px;margin:0 auto;background:#f9fafb;padding:20px">
@@ -136,21 +149,12 @@ def build_html(data):
     {unanswered_block}
     {no_new_block}
 
-    {"<h3 style='margin:0 0 12px;font-size:14px;font-weight:700;color:#374151'>New Reviews by Location</h3>" if by_loc else ""}
-    {f"""<table style="width:100%;border-collapse:collapse;margin-bottom:24px">
-      <thead>
-        <tr style="background:#f3f4f6">
-          <th style="padding:8px 12px;font-size:12px;text-align:left;color:#6b7280">Location</th>
-          <th style="padding:8px 12px;font-size:12px;text-align:center;color:#6b7280">New Reviews</th>
-          <th style="padding:8px 12px;font-size:12px;text-align:center;color:#6b7280">30-day avg (vs prior)</th>
-        </tr>
-      </thead>
-      <tbody>{loc_rows}</tbody>
-    </table>""" if by_loc else ""}
+    {loc_heading}
+    {loc_table}
 
-    {"<h3 style='margin:0 0 8px;font-size:14px;font-weight:700;color:#374151'>Top Complaint Keywords This Week</h3>" if complaints else ""}
-    {"<p style='font-size:12px;color:#6b7280;margin:0 0 12px'>Words appearing most in 1–2 star reviews</p>" if complaints else ""}
-    {f"<div style='margin-bottom:24px'>{complaint_chips}</div>" if complaints else ""}
+    {complaint_heading}
+    {complaint_sub}
+    {complaint_block}
 
     <p style="margin:24px 0 0;font-size:11px;color:#9ca3af;text-align:center">
       LTA Review Dashboard · Auto-generated weekly report<br>
