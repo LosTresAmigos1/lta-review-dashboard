@@ -295,23 +295,42 @@ async def scrape_location(context, loc) -> list:
 
 
 def load_existing() -> set:
+    """Return a set of known review_urls (primary key) plus fallback combos for rows without a URL."""
     if not REVIEWS_CSV.exists():
         return set()
+    keys = set()
     with REVIEWS_CSV.open(encoding="utf-8") as f:
-        return set(
-            (r["location_name"], r["reviewer_name"], r["review_date"], r["star_rating"])
-            for r in csv.DictReader(f)
-        )
+        for r in csv.DictReader(f):
+            url = r.get("review_url", "").strip()
+            if url:
+                keys.add(url)
+            else:
+                keys.add((r["location_name"], r["reviewer_name"], r["review_date"], r["star_rating"]))
+    return keys
+
+
+def is_duplicate(row: dict, existing_keys: set) -> bool:
+    url = row.get("review_url", "").strip()
+    if url:
+        return url in existing_keys
+    return (row["location_name"], row["reviewer_name"], row["review_date"], row["star_rating"]) in existing_keys
 
 
 def append_to_csv(new_rows: list):
     with REVIEWS_CSV.open(encoding="utf-8") as f:
         existing = list(csv.DictReader(f))
-    existing.extend(new_rows)
+    # Deduplicate the combined set by URL before writing
+    seen = set()
+    combined = []
+    for r in existing + new_rows:
+        key = r.get("review_url", "").strip() or (r["location_name"], r["reviewer_name"], r["review_date"], r["star_rating"])
+        if key not in seen:
+            seen.add(key)
+            combined.append(r)
     with REVIEWS_CSV.open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=FIELDNAMES, quoting=csv.QUOTE_ALL)
         w.writeheader()
-        w.writerows(existing)
+        w.writerows(combined)
 
 
 def build_email_html(new_rows: list) -> str:
