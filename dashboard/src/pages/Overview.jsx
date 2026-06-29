@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid,
   LineChart, Line, Legend, ComposedChart, Cell,
@@ -19,6 +19,83 @@ function KPICard({ label, value, sub, accent }) {
 }
 
 const RATING_COLORS = { 5:'#10b981', 4:'#6ee7b7', 3:'#fbbf24', 2:'#f97316', 1:'#ef4444' }
+const DEFAULT_GOAL  = 4.5
+
+function GoalTracker({ allReviews }) {
+  const [goals, setGoals] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('lta_goals') || '{}') } catch { return {} }
+  })
+  const [editing, setEditing] = useState(null) // loc name being edited
+  const [editVal, setEditVal] = useState('')
+
+  const locStats = useMemo(() => {
+    const locs = [...new Set(allReviews.map(r => r.location_name))].sort()
+    return locs.map(loc => {
+      const revs = allReviews.filter(r => r.location_name === loc)
+      const avg  = revs.length ? revs.reduce((s,r) => s + Number(r.star_rating), 0) / revs.length : 0
+      const goal = goals[loc] ?? DEFAULT_GOAL
+      return { loc, avg, goal, pct: Math.min(avg / goal * 100, 100), count: revs.length }
+    })
+  }, [allReviews, goals])
+
+  function saveGoal(loc, raw) {
+    const val = Math.min(5, Math.max(1, parseFloat(raw) || DEFAULT_GOAL))
+    const next = { ...goals, [loc]: +val.toFixed(1) }
+    setGoals(next)
+    localStorage.setItem('lta_goals', JSON.stringify(next))
+    setEditing(null)
+  }
+
+  const atGoal = locStats.filter(d => d.avg >= d.goal).length
+
+  return (
+    <div className="bg-white rounded-xl border border-stone-200 p-5">
+      <div className="flex items-center justify-between mb-1">
+        <h2 className="text-sm font-semibold text-stone-700">Rating Goals</h2>
+        <span className="text-xs text-stone-400">{atGoal}/{locStats.length} locations at goal · click target to edit</span>
+      </div>
+      <p className="text-xs text-stone-400 mb-4">Lifetime average vs. your target. Default goal is {DEFAULT_GOAL} ★</p>
+      <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+        {locStats.map(({ loc, avg, goal, pct, count }) => {
+          const color   = pct >= 100 ? '#10b981' : pct >= 90 ? '#fbbf24' : '#ef4444'
+          const textCol = pct >= 100 ? 'text-emerald-600' : pct >= 90 ? 'text-yellow-600' : 'text-red-500'
+          const short   = loc.replace('Los Tres Amigos ','LTA ').replace('Los Tres Mex Grill ','LTMG ')
+          return (
+            <div key={loc}>
+              <div className="flex items-center gap-2 mb-0.5">
+                <span className="text-xs text-stone-600 flex-1 truncate" title={loc}>{short}</span>
+                <span className={`text-xs font-bold tabular-nums ${textCol}`}>{avg.toFixed(2)} ★</span>
+                <span className="text-stone-300 text-xs">/</span>
+                {editing === loc ? (
+                  <form onSubmit={e => { e.preventDefault(); saveGoal(loc, editVal) }} className="flex gap-1">
+                    <input
+                      autoFocus
+                      type="number" min="1" max="5" step="0.1"
+                      value={editVal}
+                      onChange={e => setEditVal(e.target.value)}
+                      onBlur={() => saveGoal(loc, editVal)}
+                      className="w-14 text-xs border border-amber-400 rounded px-1 py-0.5 focus:outline-none"
+                    />
+                  </form>
+                ) : (
+                  <button
+                    onClick={() => { setEditing(loc); setEditVal(String(goal)) }}
+                    className="text-xs text-stone-400 hover:text-amber-600 tabular-nums underline underline-offset-2 decoration-dashed"
+                    title="Click to set goal"
+                  >{goal.toFixed(1)} ★</button>
+                )}
+                <span className="text-[10px] text-stone-300 w-16 text-right tabular-nums">{count} reviews</span>
+              </div>
+              <div className="w-full bg-stone-100 rounded-full h-2 overflow-hidden">
+                <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, backgroundColor: color }} />
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
 
 export default function Overview({ allReviews, filtered }) {
   const sentiment     = useMemo(() => getSentiment(filtered), [filtered])
@@ -178,6 +255,9 @@ export default function Overview({ allReviews, filtered }) {
           }
         </div>
       </div>
+
+      {/* Goal tracker */}
+      <GoalTracker allReviews={allReviews} />
 
       {/* Monthly trend */}
       <div className="bg-white rounded-xl border border-stone-200 p-5">

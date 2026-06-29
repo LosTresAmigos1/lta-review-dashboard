@@ -3,6 +3,27 @@ import { getBrand } from '../utils/dataUtils.js'
 
 const PAGE_SIZE = 50
 
+function exportCSV(rows) {
+  const headers = ['Date','Location','City','Stars','Reviewer','Review','Owner Response','Review URL']
+  const escape  = v => `"${(v ?? '').toString().replace(/"/g, '""')}"`
+  const lines   = [
+    headers.join(','),
+    ...rows.map(r => [
+      r.review_date, r.location_name, r.city, r.star_rating,
+      r.reviewer_name, r.review_text, r.owner_response, r.review_url,
+    ].map(escape).join(',')),
+  ]
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' })
+  const url  = URL.createObjectURL(blob)
+  const a    = document.createElement('a')
+  a.href     = url
+  a.download = `lta-reviews-${new Date().toISOString().slice(0, 10)}.csv`
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+}
+
 function StarBadge({ n }) {
   const color = n >= 4 ? 'text-emerald-600' : n === 3 ? 'text-yellow-600' : 'text-red-500'
   return <span className={`font-medium ${color}`}>{'★'.repeat(n)}{'☆'.repeat(5 - n)}</span>
@@ -84,7 +105,18 @@ export default function ReviewExplorer({ filtered }) {
           />
           No owner response only
         </label>
-        <span className="text-xs text-stone-400 ml-auto">{processed.length.toLocaleString()} results</span>
+        <span className="text-xs text-stone-400">{processed.length.toLocaleString()} results</span>
+        <button
+          onClick={() => exportCSV(processed)}
+          className="ml-auto flex items-center gap-1.5 text-xs font-medium text-stone-600 bg-stone-100 hover:bg-stone-200 border border-stone-200 px-3 py-1.5 rounded-lg transition-colors"
+          title={`Export ${processed.length.toLocaleString()} reviews as CSV`}
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5">
+            <path d="M10.75 2.75a.75.75 0 0 0-1.5 0v8.614L6.295 8.235a.75.75 0 1 0-1.09 1.03l4.25 4.5a.75.75 0 0 0 1.09 0l4.25-4.5a.75.75 0 0 0-1.09-1.03l-2.955 3.129V2.75Z" />
+            <path d="M3.5 12.75a.75.75 0 0 0-1.5 0v2.5A2.75 2.75 0 0 0 4.75 18h10.5A2.75 2.75 0 0 0 18 15.25v-2.5a.75.75 0 0 0-1.5 0v2.5c0 .69-.56 1.25-1.25 1.25H4.75c-.69 0-1.25-.56-1.25-1.25v-2.5Z" />
+          </svg>
+          Export CSV
+        </button>
       </div>
 
       {/* Table */}
