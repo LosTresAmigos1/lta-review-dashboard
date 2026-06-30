@@ -22,4 +22,5 @@ dashboard/.vercel/cache/
 
 # Credentials
 credentials.json
+token.json
 *.env

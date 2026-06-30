@@ -217,8 +217,9 @@ function LanguageBreakdown({ allReviews }) {
         {byLoc.map(({ loc, pct, spanish, total }) => (
           <div key={loc} className="flex items-center gap-3">
             <span className="text-xs text-stone-600 w-44 shrink-0 truncate" title={loc}>{loc.replace('Los Tres Amigos ','LTA ').replace('Los Tres Mex Grill ','LTMG ')}</span>
-            <div className="flex-1 bg-stone-100 rounded-full h-4 overflow-hidden">
-              <div className="h-full bg-emerald-400 rounded-full" style={{ width: `${pct}%` }} />
+            <div className="flex-1 h-4 rounded-full overflow-hidden flex">
+              <div className="h-full bg-blue-400 transition-all" style={{ width: `${100 - pct}%` }} />
+              <div className="h-full bg-emerald-400 transition-all" style={{ width: `${pct}%` }} />
             </div>
             <span className="text-xs text-stone-500 w-20 shrink-0 text-right">{pct}% · {spanish}/{total}</span>
           </div>
