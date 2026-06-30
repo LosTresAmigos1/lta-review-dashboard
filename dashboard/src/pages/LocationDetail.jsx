@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { AnimatePresence, motion } from 'framer-motion'
 import { ResponsiveContainer, LineChart, Line, Tooltip } from 'recharts'
 import { getLocationStats, fmtPct, fmtRating, getBrandColor, isUnverified } from '../utils/dataUtils.js'
 import { extractInsights } from '../utils/textAnalysis.js'
@@ -123,8 +124,8 @@ function LocationCard({ stat, isSelected, onSelect }) {
   const sent = stat.periodSentiment
   return (
     <article
-      className={`bg-white border rounded-xl p-4 cursor-pointer transition-all hover:shadow-md ${
-        isSelected ? 'border-amber-500 ring-2 ring-amber-200' : 'border-stone-200 hover:border-stone-300'
+      className={`bg-white border rounded-xl p-4 cursor-pointer shadow-sm transition-all hover:shadow-md hover:-translate-y-0.5 ${
+        isSelected ? 'border-amber-500 ring-2 ring-amber-200 shadow-md' : 'border-stone-200 hover:border-stone-300'
       }`}
       onClick={onSelect}
       role="button"
@@ -201,13 +202,22 @@ export default function LocationDetail({ allReviews, filtered, filters }) {
         ))}
       </div>
 
+      <AnimatePresence>
       {selectedStat && (
-        <div className="bg-white border border-amber-200 rounded-2xl p-6">
+        <motion.div
+          key={selectedStat.name}
+          initial={{ opacity: 0, height: 0 }}
+          animate={{ opacity: 1, height: 'auto' }}
+          exit={{ opacity: 0, height: 0 }}
+          transition={{ duration: 0.2 }}
+          style={{ overflow: 'hidden' }}
+        >
+        <div className="bg-white border border-amber-200 rounded-2xl shadow-md p-6">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-lg font-bold text-stone-800">{selectedStat.name}</h2>
             <button
               onClick={() => setSelectedLocation(null)}
-              className="text-stone-400 hover:text-stone-600 text-xl leading-none"
+              className="text-stone-400 hover:text-stone-600 text-xl leading-none transition-colors"
               aria-label="Close detail panel"
             >×</button>
           </div>
@@ -256,7 +266,7 @@ export default function LocationDetail({ allReviews, filtered, filters }) {
                 ? (
                   <ResponsiveContainer width="100%" height={80}>
                     <LineChart data={selectedStat.spark} margin={{ top: 4, right: 4, left: 4, bottom: 4 }}>
-                      <Line type="monotone" dataKey="avg" stroke="#d97706" strokeWidth={2} dot={{ r: 3, fill: '#d97706' }} connectNulls />
+                      <Line type="monotone" dataKey="avg" stroke="#d97706" strokeWidth={2} dot={{ r: 3, fill: '#bb9230' }} connectNulls />
                       <Tooltip
                         content={({ active, payload }) =>
                           active && payload?.length
@@ -283,7 +293,9 @@ export default function LocationDetail({ allReviews, filtered, filters }) {
             }
           </div>
         </div>
+        </motion.div>
       )}
+      </AnimatePresence>
     </div>
   )
 }

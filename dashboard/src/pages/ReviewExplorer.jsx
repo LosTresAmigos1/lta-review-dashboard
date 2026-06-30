@@ -1,6 +1,8 @@
 import { useState, useMemo } from 'react'
 import { getBrand } from '../utils/dataUtils.js'
 import { useToast } from '../components/ui/Toast.jsx'
+import Card from '../components/ui/Card.jsx'
+import Button from '../components/ui/Button.jsx'
 
 const PAGE_SIZE = 50
 
@@ -87,7 +89,7 @@ export default function ReviewExplorer({ filtered }) {
   return (
     <div className="space-y-4">
       {/* Controls */}
-      <div className="bg-white border border-stone-200 rounded-xl p-4 flex flex-wrap items-center gap-3">
+      <Card className="p-4 flex flex-wrap items-center gap-3">
         <div className="flex-1 min-w-48">
           <label className="sr-only" htmlFor="kw-search">Keyword search</label>
           <input
@@ -109,9 +111,10 @@ export default function ReviewExplorer({ filtered }) {
           No owner response only
         </label>
         <span className="text-xs text-stone-400">{processed.length.toLocaleString()} results</span>
-        <button
+        <Button
+          variant="secondary"
           onClick={() => { exportCSV(processed); showToast(`Exported ${processed.length.toLocaleString()} reviews`) }}
-          className="ml-auto flex items-center gap-1.5 text-xs font-medium text-stone-600 bg-stone-100 hover:bg-stone-200 border border-stone-200 px-3 py-1.5 rounded-lg transition-colors"
+          className="ml-auto"
           title={`Export ${processed.length.toLocaleString()} reviews as CSV`}
         >
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5">
@@ -119,8 +122,8 @@ export default function ReviewExplorer({ filtered }) {
             <path d="M3.5 12.75a.75.75 0 0 0-1.5 0v2.5A2.75 2.75 0 0 0 4.75 18h10.5A2.75 2.75 0 0 0 18 15.25v-2.5a.75.75 0 0 0-1.5 0v2.5c0 .69-.56 1.25-1.25 1.25H4.75c-.69 0-1.25-.56-1.25-1.25v-2.5Z" />
           </svg>
           Export CSV
-        </button>
-      </div>
+        </Button>
+      </Card>
 
       {/* Table */}
       <div className="bg-white border border-stone-200 rounded-xl overflow-hidden">

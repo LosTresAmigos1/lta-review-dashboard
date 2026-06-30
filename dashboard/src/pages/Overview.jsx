@@ -7,14 +7,15 @@ import {
   getSentiment, getMonthlyTrend, fmtPct, fmtRating, getBrandColor, getBrand,
   getConfidence, isUnverified,
 } from '../utils/dataUtils.js'
+import Card from '../components/ui/Card.jsx'
 
 function KPICard({ label, value, sub, accent }) {
   return (
-    <div className="bg-white rounded-xl border border-stone-200 p-5 flex flex-col gap-1">
+    <Card className="p-5 flex flex-col gap-1 transition-shadow hover:shadow-md">
       <p className="text-xs font-semibold text-stone-500 uppercase tracking-wide">{label}</p>
       <p className={`text-3xl font-bold tracking-tight ${accent || 'text-stone-800'}`}>{value}</p>
       {sub && <p className="text-xs text-stone-400 mt-0.5">{sub}</p>}
-    </div>
+    </Card>
   )
 }
 
@@ -50,7 +51,7 @@ function GoalTracker({ allReviews }) {
   const atGoal = locStats.filter(d => d.avg >= d.goal).length
 
   return (
-    <div className="bg-white rounded-xl border border-stone-200 p-5">
+    <Card className="p-5">
       <div className="flex items-center justify-between mb-1">
         <h2 className="text-sm font-semibold text-stone-700">Rating Goals</h2>
         <span className="text-xs text-stone-400">{atGoal}/{locStats.length} locations at goal · click target to edit</span>
@@ -94,7 +95,7 @@ function GoalTracker({ allReviews }) {
           )
         })}
       </div>
-    </div>
+    </Card>
   )
 }
 
@@ -186,7 +187,7 @@ export default function Overview({ allReviews, filtered }) {
           sub={`${sentiment.positiveN} reviews (4-5 ★)`}
           accent="text-emerald-600"
         />
-        <div className="bg-white rounded-xl border border-stone-200 p-5">
+        <Card className="p-5 transition-shadow hover:shadow-md">
           <p className="text-xs font-semibold text-stone-500 uppercase tracking-wide mb-2">Sentiment Split</p>
           <div className="space-y-1.5">
             {[
@@ -205,12 +206,12 @@ export default function Overview({ allReviews, filtered }) {
               </div>
             ))}
           </div>
-        </div>
+        </Card>
       </div>
 
       <div className="grid lg:grid-cols-2 gap-6">
         {/* Star distribution */}
-        <div className="bg-white rounded-xl border border-stone-200 p-5">
+        <Card className="p-5 transition-shadow hover:shadow-md">
           <h2 className="text-sm font-semibold text-stone-700 mb-4">Star Distribution — Period</h2>
           <ResponsiveContainer width="100%" height={200}>
             <BarChart data={starDist} layout="vertical" margin={{ top: 0, right: 40, left: 10, bottom: 0 }}>
@@ -225,10 +226,10 @@ export default function Overview({ allReviews, filtered }) {
               </Bar>
             </BarChart>
           </ResponsiveContainer>
-        </div>
+        </Card>
 
         {/* Positive % by location */}
-        <div className="bg-white rounded-xl border border-stone-200 p-5">
+        <Card className="p-5 transition-shadow hover:shadow-md">
           <h2 className="text-sm font-semibold text-stone-700 mb-1">Positive % by Location</h2>
           <p className="text-xs text-stone-400 mb-4">Striped bars = n&lt;10 (low confidence)</p>
           {byLocation.length === 0
@@ -244,7 +245,7 @@ export default function Overview({ allReviews, filtered }) {
                     {byLocation.map(d => (
                       <Cell
                         key={d.fullName}
-                        fill={d.low ? '#d6d3d1' : '#d97706'}
+                        fill={d.low ? '#d6d3d1' : '#bb9230'}
                         fillOpacity={d.low ? 0.5 : 1}
                         className={d.low ? 'low-confidence' : ''}
                       />
@@ -254,14 +255,14 @@ export default function Overview({ allReviews, filtered }) {
               </ResponsiveContainer>
             )
           }
-        </div>
+        </Card>
       </div>
 
       {/* Goal tracker */}
       <GoalTracker allReviews={allReviews} />
 
       {/* Monthly trend */}
-      <div className="bg-white rounded-xl border border-stone-200 p-5">
+      <Card className="p-5 transition-shadow hover:shadow-md">
         <h2 className="text-sm font-semibold text-stone-700 mb-4">Monthly Trend — Avg Rating &amp; Volume</h2>
         {monthlyTrend.length < 2
           ? <p className="text-sm text-stone-400 py-8 text-center">Not enough data for a trend</p>
@@ -280,7 +281,7 @@ export default function Overview({ allReviews, filtered }) {
             </ResponsiveContainer>
           )
         }
-      </div>
+      </Card>
     </div>
   )
 }
