@@ -1,16 +1,19 @@
 """
 Headless scraper for all 21 LTA restaurants.
 Run by GitHub Actions every 4 hours.
-Writes new reviews to dashboard/reviews.csv and outputs GitHub Actions variables.
+Writes new reviews to dashboard/reviews.db (source of truth) and
+dashboard/reviews.csv (secondary export), and outputs GitHub Actions variables.
 """
 import os
 import sys
 import csv
 import re
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from collections import defaultdict
+
+import db
 
 BASE_DIR = Path(__file__).parent
 REVIEWS_CSV = BASE_DIR / "dashboard" / "reviews.csv"
@@ -331,7 +334,10 @@ async def scroll_reviews(page, max_reviews=200):
     return count
 
 
-async def scrape_location(context, loc) -> list:
+async def scrape_location(context, loc) -> tuple:
+    """Returns (reviews, error_message). error_message is None on success
+    (including the legitimate zero-new-reviews case) so callers can tell
+    "found nothing" apart from "the scrape itself failed"."""
     name = loc["name"]
     search = loc["search"]
     print(f"  Scraping: {name}")
@@ -358,15 +364,15 @@ async def scrape_location(context, loc) -> list:
             await page.wait_for_timeout(2000)
             if not await go_to_reviews_tab(page):
                 print(f"    [SKIP] no Reviews tab found")
-                return []
+                return [], "no Reviews tab found"
 
         await sort_by_newest(page)
         reviews = await scroll_and_extract(page, MAX_SCROLL)
         print(f"    -> {len(reviews)} reviews scraped")
-        return reviews
+        return reviews, None
     except Exception as e:
         print(f"    [ERR] {e}")
-        return []
+        return [], str(e)
     finally:
         await page.close()
 
@@ -469,6 +475,18 @@ async def main():
     existing = load_existing()
     print(f"Existing reviews in CSV: {len(existing)}")
 
+    conn = db.get_connection()
+    db.init_schema(conn)
+    run_mode = "local" if LOCAL_MODE else "cloud"
+    run_cur = conn.execute(
+        "INSERT INTO scraper_runs (started_at, mode, status) VALUES (?, ?, 'running')",
+        (datetime.now(timezone.utc).isoformat(), run_mode),
+    )
+    run_id = run_cur.lastrowid
+    conn.commit()
+    run_stats = {"attempted": 0, "succeeded": 0, "failed": 0, "new": 0, "edited": 0, "deleted": 0}
+    run_errors = []
+
     all_scraped = []
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=not LOCAL_MODE)
@@ -477,19 +495,82 @@ async def main():
             locale="en-US",
         )
         for loc in LOCATIONS:
-            reviews = await scrape_location(context, loc)
-            for r in reviews:
-                all_scraped.append({
-                    "location_name":  loc["name"],
-                    "city":           loc["city"],
-                    "reviewer_name":  r["reviewer_name"],
-                    "review_date":    r["review_date"],
-                    "star_rating":    r["star_rating"],
-                    "review_text":    r["review_text"],
-                    "owner_response": r["owner_response"],
-                    "review_url":     r["review_url"],
-                })
+            run_stats["attempted"] += 1
+            loc_started = datetime.now(timezone.utc)
+            reviews, error = await scrape_location(context, loc)
+            duration_ms = int((datetime.now(timezone.utc) - loc_started).total_seconds() * 1000)
+
+            loc_rows = [{
+                "location_name":  loc["name"],
+                "city":           loc["city"],
+                "reviewer_name":  r["reviewer_name"],
+                "review_date":    r["review_date"],
+                "star_rating":    r["star_rating"],
+                "review_text":    r["review_text"],
+                "owner_response": r["owner_response"],
+                "review_url":     r["review_url"],
+            } for r in reviews]
+            all_scraped.extend(loc_rows)
+
+            # Dual-write into SQLite (source of truth going forward) alongside
+            # the CSV write below (kept as a secondary, human-readable export).
+            location_id = db.get_or_create_location(
+                conn, loc["name"], loc["city"], db.get_brand(loc["name"]), loc["search"]
+            )
+            now_iso = datetime.now(timezone.utc).isoformat()
+            scraped_keys = set()
+            window_min_date = None
+            loc_new = loc_edited = 0
+            for row in loc_rows:
+                db_row = dict(row)
+                db_row["star_rating"] = row["star_rating"] or None
+                key = db.dedup_key(loc["name"], db_row)
+                scraped_keys.add(key)
+                if row["review_date"] and (window_min_date is None or row["review_date"] < window_min_date):
+                    window_min_date = row["review_date"]
+                result = db.upsert_review(conn, location_id, loc["name"], db_row, now_iso)
+                if result == "new":
+                    loc_new += 1
+                elif result == "edited":
+                    loc_edited += 1
+
+            loc_deleted = (
+                db.detect_deletions(conn, location_id, scraped_keys, window_min_date, now_iso)
+                if window_min_date else 0
+            )
+
+            if error:
+                run_stats["failed"] += 1
+                run_errors.append(f"{loc['name']}: {error}")
+            else:
+                run_stats["succeeded"] += 1
+            run_stats["new"] += loc_new
+            run_stats["edited"] += loc_edited
+            run_stats["deleted"] += loc_deleted
+
+            conn.execute(
+                """INSERT INTO scraper_run_locations
+                   (run_id, location_id, status, reviews_found, reviews_new, error_message, duration_ms)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (run_id, location_id, "error" if error else "ok",
+                 len(reviews), loc_new, error, duration_ms),
+            )
+            conn.commit()
         await browser.close()
+
+    run_status = "ok" if run_stats["failed"] == 0 else ("partial" if run_stats["succeeded"] > 0 else "failed")
+    conn.execute(
+        """UPDATE scraper_runs SET finished_at = ?, status = ?, locations_attempted = ?,
+           locations_succeeded = ?, locations_failed = ?, new_reviews_count = ?,
+           edited_reviews_count = ?, deleted_reviews_count = ?, error_summary = ?
+           WHERE id = ?""",
+        (datetime.now(timezone.utc).isoformat(), run_status, run_stats["attempted"],
+         run_stats["succeeded"], run_stats["failed"], run_stats["new"], run_stats["edited"],
+         run_stats["deleted"], "; ".join(run_errors) if run_errors else None, run_id),
+    )
+    conn.commit()
+    conn.close()
+    print(f"SQLite run #{run_id}: {run_stats}")
 
     new_rows = []
     for r in all_scraped:
@@ -511,7 +592,7 @@ async def main():
     if LOCAL_MODE:
         import subprocess
         print("\nPushing to GitHub...")
-        subprocess.run("git add dashboard/reviews.csv", shell=True, cwd=BASE_DIR)
+        subprocess.run("git add dashboard/reviews.csv dashboard/reviews.db", shell=True, cwd=BASE_DIR)
         msg = f"update: {len(new_rows)} new reviews" if new_rows else "update: no new reviews"
         subprocess.run(f'git commit -m "{msg}"', shell=True, cwd=BASE_DIR)
         subprocess.run("git push", shell=True, cwd=BASE_DIR)

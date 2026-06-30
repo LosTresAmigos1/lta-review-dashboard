@@ -1,0 +1,39 @@
+name: Health Check
+
+# Runs on its own daily schedule, independent of update-reviews.yml's ~6h
+# cron, so it keeps catching problems even if that workflow's trigger stops
+# firing entirely (not just if an individual run errors).
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 13 * * *'
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run health check
+        run: python health_check.py
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+
+      - name: Commit notification log
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add dashboard/reviews.db
+          git diff --staged --quiet || git commit -m "chore: health-check housekeeping [skip ci]"
+          git push

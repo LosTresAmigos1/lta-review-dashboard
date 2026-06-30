@@ -1,0 +1,258 @@
+"""
+Shared SQLite access layer for the review pipeline.
+
+dashboard/reviews.db is the source of truth (committed to git like
+reviews.csv was before it). This module owns the schema and the
+upsert/revision/deletion-detection logic so auto_update.py, the one-off
+migration script, and future pipeline stages (validate.py,
+refresh_analytics.py, export_chunks.py) all go through the same path
+instead of re-implementing dedup/diff logic per script.
+"""
+import re
+import sqlite3
+from datetime import datetime, timedelta
+from pathlib import Path
+
+BASE_DIR = Path(__file__).parent
+DB_PATH = BASE_DIR / "dashboard" / "reviews.db"
+
+# A review re-appearing missing for less than this long is treated as
+# scraper noise (a stalled scroll, a transient DOM miss), not a deletion.
+DELETION_GRACE = timedelta(hours=12)
+
+_PLACEID_RE = re.compile(r'placeid=([^&]+)')
+_MAPS_ID_RE = re.compile(r'/reviews/([^/?]+)')
+
+# Mirrors dashboard/src/utils/dataUtils.js's BRANDS/getBrand() -- kept here as
+# the single Python-side copy so auto_update.py and migrate_csv_to_sqlite.py
+# don't each maintain their own.
+BRANDS = ['Los Tres Amigos', 'Los Tres Mex Grill', 'Mi Lindo San Blas', 'Rio Luna', 'Casa Tequila']
+
+
+def get_brand(name: str) -> str:
+    for b in BRANDS:
+        if name.startswith(b):
+            return b
+    return 'Other'
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS locations (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    name          TEXT UNIQUE NOT NULL,
+    city          TEXT,
+    brand         TEXT,
+    search_query  TEXT,
+    is_active     INTEGER NOT NULL DEFAULT 1,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS reviews (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    location_id          INTEGER NOT NULL REFERENCES locations(id),
+    canonical_review_id  TEXT,
+    dedup_key            TEXT NOT NULL UNIQUE,
+    reviewer_name        TEXT,
+    review_date          TEXT,
+    star_rating          INTEGER,
+    review_text          TEXT,
+    owner_response       TEXT,
+    review_url           TEXT,
+    first_seen_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    last_seen_at         TEXT,
+    missing_since        TEXT,
+    is_deleted           INTEGER NOT NULL DEFAULT 0,
+    deleted_detected_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_reviews_location ON reviews(location_id);
+CREATE INDEX IF NOT EXISTS idx_reviews_date ON reviews(review_date);
+
+CREATE TABLE IF NOT EXISTS review_revisions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    review_id     INTEGER NOT NULL REFERENCES reviews(id),
+    changed_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    field_changed TEXT NOT NULL,
+    old_value     TEXT,
+    new_value     TEXT
+);
+
+CREATE TABLE IF NOT EXISTS scraper_runs (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at             TEXT NOT NULL,
+    finished_at            TEXT,
+    mode                   TEXT,
+    status                 TEXT,
+    locations_attempted    INTEGER DEFAULT 0,
+    locations_succeeded    INTEGER DEFAULT 0,
+    locations_failed       INTEGER DEFAULT 0,
+    new_reviews_count      INTEGER DEFAULT 0,
+    edited_reviews_count   INTEGER DEFAULT 0,
+    deleted_reviews_count  INTEGER DEFAULT 0,
+    error_summary          TEXT
+);
+
+CREATE TABLE IF NOT EXISTS scraper_run_locations (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id         INTEGER NOT NULL REFERENCES scraper_runs(id),
+    location_id    INTEGER NOT NULL REFERENCES locations(id),
+    status         TEXT,
+    reviews_found  INTEGER DEFAULT 0,
+    reviews_new    INTEGER DEFAULT 0,
+    error_message  TEXT,
+    duration_ms    INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS validation_flags (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    review_id    INTEGER REFERENCES reviews(id),
+    location_id  INTEGER REFERENCES locations(id),
+    flag_type    TEXT NOT NULL,
+    detail       TEXT,
+    detected_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    resolved_at  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS analytics_cache (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    cache_key    TEXT UNIQUE NOT NULL,
+    computed_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    payload      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS notifications_log (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    sent_at              TEXT NOT NULL DEFAULT (datetime('now')),
+    notification_type    TEXT NOT NULL,
+    recipient            TEXT,
+    subject              TEXT,
+    related_review_id    INTEGER REFERENCES reviews(id),
+    related_location_id  INTEGER REFERENCES locations(id)
+);
+"""
+
+
+def canonical_review_id(url: str):
+    if not url:
+        return None
+    m = _PLACEID_RE.search(url)
+    if m:
+        return m.group(1)
+    m = _MAPS_ID_RE.search(url)
+    if m:
+        return m.group(1)
+    return None
+
+
+def dedup_key(location_name: str, row: dict) -> str:
+    rid = canonical_review_id(row.get("review_url", ""))
+    if rid:
+        return rid
+    return "|".join([location_name, row.get("reviewer_name", ""),
+                      row.get("review_date", ""), str(row.get("star_rating", ""))])
+
+
+def get_connection() -> sqlite3.Connection:
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def init_schema(conn: sqlite3.Connection):
+    conn.executescript(SCHEMA)
+    conn.commit()
+
+
+def get_or_create_location(conn, name: str, city: str = "", brand: str = "", search_query: str = "") -> int:
+    row = conn.execute("SELECT id FROM locations WHERE name = ?", (name,)).fetchone()
+    if row:
+        conn.execute(
+            "UPDATE locations SET city = ?, brand = ?, search_query = ? WHERE id = ?",
+            (city, brand, search_query, row["id"]),
+        )
+        return row["id"]
+    cur = conn.execute(
+        "INSERT INTO locations (name, city, brand, search_query) VALUES (?, ?, ?, ?)",
+        (name, city, brand, search_query),
+    )
+    return cur.lastrowid
+
+
+def upsert_review(conn, location_id: int, location_name: str, row: dict, now: str) -> str:
+    """Insert a new review or update an existing one. Returns 'new', 'edited', or 'unchanged'."""
+    key = dedup_key(location_name, row)
+    existing = conn.execute("SELECT * FROM reviews WHERE dedup_key = ?", (key,)).fetchone()
+
+    if existing is None:
+        conn.execute(
+            """INSERT INTO reviews
+               (location_id, canonical_review_id, dedup_key, reviewer_name, review_date,
+                star_rating, review_text, owner_response, review_url, first_seen_at, last_seen_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (location_id, canonical_review_id(row.get("review_url", "")), key,
+             row.get("reviewer_name", ""), row.get("review_date", ""),
+             row.get("star_rating") or None, row.get("review_text", ""),
+             row.get("owner_response", ""), row.get("review_url", ""), now, now),
+        )
+        return "new"
+
+    changed_fields = []
+    for field in ("review_text", "owner_response", "star_rating"):
+        old_val = existing[field]
+        new_val = row.get(field) if field != "star_rating" else (row.get("star_rating") or None)
+        old_cmp = old_val if old_val not in ("", None) else None
+        new_cmp = new_val if new_val not in ("", None) else None
+        if old_cmp != new_cmp and new_cmp is not None:
+            changed_fields.append((field, old_val, new_val))
+
+    for field, old_val, new_val in changed_fields:
+        conn.execute(
+            """INSERT INTO review_revisions (review_id, field_changed, old_value, new_value)
+               VALUES (?, ?, ?, ?)""",
+            (existing["id"], field, str(old_val) if old_val is not None else None,
+             str(new_val) if new_val is not None else None),
+        )
+
+    conn.execute(
+        """UPDATE reviews SET review_text = ?, owner_response = ?, star_rating = ?,
+           last_seen_at = ?, missing_since = NULL, is_deleted = 0, deleted_detected_at = NULL
+           WHERE id = ?""",
+        (row.get("review_text", existing["review_text"]),
+         row.get("owner_response", existing["owner_response"]),
+         row.get("star_rating") or existing["star_rating"],
+         now, existing["id"]),
+    )
+    return "edited" if changed_fields else "unchanged"
+
+
+def detect_deletions(conn, location_id: int, scraped_keys: set, window_min_date: str, now: str) -> int:
+    """
+    Mark reviews as deleted if they fall within this run's scraped date window
+    (i.e. should have been re-encountered) but weren't seen for two consecutive
+    runs in a row (DELETION_GRACE), so a single stalled scrape doesn't cause a
+    false-positive deletion. Returns the count newly marked deleted.
+    """
+    if not window_min_date:
+        return 0
+    candidates = conn.execute(
+        """SELECT id, dedup_key, missing_since FROM reviews
+           WHERE location_id = ? AND review_date >= ? AND is_deleted = 0""",
+        (location_id, window_min_date),
+    ).fetchall()
+
+    newly_deleted = 0
+    now_dt = datetime.fromisoformat(now)
+    for r in candidates:
+        if r["dedup_key"] in scraped_keys:
+            continue
+        if r["missing_since"] is None:
+            conn.execute("UPDATE reviews SET missing_since = ? WHERE id = ?", (now, r["id"]))
+            continue
+        missing_since_dt = datetime.fromisoformat(r["missing_since"])
+        if now_dt - missing_since_dt >= DELETION_GRACE:
+            conn.execute(
+                "UPDATE reviews SET is_deleted = 1, deleted_detected_at = ? WHERE id = ?",
+                (now, r["id"]),
+            )
+            newly_deleted += 1
+    return newly_deleted

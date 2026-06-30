@@ -1,7 +1,9 @@
 name: Update Reviews
 
 on:
-  workflow_dispatch:          # manual trigger only (scheduled scraping runs locally instead)
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *'    # ~every 6h; GitHub may delay scheduled runs under load
 
 jobs:
   update:
@@ -28,13 +30,28 @@ jobs:
         id: scrape
         run: python auto_update.py
 
+      - name: Validate data
+        if: always()
+        run: python validate.py
+
+      - name: Refresh analytics
+        if: always()
+        run: python refresh_analytics.py
+
+      - name: Send alert notifications
+        if: always()
+        run: python notify.py
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+
       - name: Commit updated reviews
-        if: steps.scrape.outputs.new_count != '0' && steps.scrape.outputs.new_count != ''
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add dashboard/reviews.csv
-          git diff --staged --quiet || git commit -m "chore: add ${{ steps.scrape.outputs.new_count }} new reviews [skip ci]"
+          git add dashboard/reviews.csv dashboard/reviews.db
+          git diff --staged --quiet || git commit -m "chore: pipeline run (+${{ steps.scrape.outputs.new_count || '0' }} reviews) [skip ci]"
           git push
 
       - name: Set up Node
