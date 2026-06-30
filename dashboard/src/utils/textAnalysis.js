@@ -50,6 +50,7 @@ function wordFreq(texts) {
 function findMenuItems(reviews) {
   const found = {}
   reviews.forEach(r => {
+    if (!r.review_text) return
     const text = r.review_text.toLowerCase()
     MENU_ITEMS.forEach(item => {
       if (text.includes(item)) {
@@ -72,6 +73,19 @@ const STAFF_PATTERNS = [
   /([A-Z][a-z]+)\s+(?:was our|is our|helped us|was amazing|was great|was wonderful|was fantastic|was awesome)/g,
 ]
 
+// Common capitalized words that match the staff-name patterns but aren't names
+// (languages, days/months, generic adjectives, etc.)
+const NAME_DENYLIST = new Set([
+  'english','spanish','mexican','american','great','good','amazing','awesome',
+  'wonderful','fantastic','excellent','perfect','friendly','attentive','quick',
+  'fast','slow','rude','nice','super','very','extremely','always','definitely',
+  'absolutely','overall','honestly','seriously','today','yesterday','monday',
+  'tuesday','wednesday','thursday','friday','saturday','sunday','january',
+  'february','march','april','may','june','july','august','september',
+  'october','november','december','manager','server','waiter','waitress',
+  'bartender','host','hostess',
+])
+
 function findStaffNames(reviews) {
   const counts = {}
   const byName = {}
@@ -84,6 +98,7 @@ function findStaffNames(reviews) {
       while ((m = re.exec(text)) !== null) {
         const name = m[1]
         if (!name || name.length < 2) continue
+        if (NAME_DENYLIST.has(name.toLowerCase())) continue
         if (!counts[name]) { counts[name] = 0; byName[name] = [] }
         counts[name]++
         if (byName[name].length < 3) byName[name].push(r)
@@ -103,7 +118,7 @@ function topThemes(reviews, topN = 8) {
   return freq.slice(0, topN).map(({ word, count }) => ({
     theme: word,
     count,
-    reviews: reviews.filter(r => r.review_text.toLowerCase().includes(word)).slice(0, 3),
+    reviews: reviews.filter(r => r.review_text && r.review_text.toLowerCase().includes(word)).slice(0, 3),
   }))
 }
 

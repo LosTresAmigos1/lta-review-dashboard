@@ -64,8 +64,9 @@ export default function ReviewExplorer({ filtered }) {
     return rows
   }, [filtered, noReply, keyword, sortKey, sortDir])
 
-  const totalPages = Math.ceil(processed.length / PAGE_SIZE)
-  const visible    = processed.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
+  const totalPages = Math.max(1, Math.ceil(processed.length / PAGE_SIZE))
+  const safePage   = Math.min(page, totalPages - 1)
+  const visible    = processed.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE)
 
   function Th({ k, label }) {
     const active = sortKey === k
@@ -205,16 +206,16 @@ export default function ReviewExplorer({ filtered }) {
         {totalPages > 1 && (
           <div className="flex items-center justify-between border-t border-stone-100 px-4 py-3">
             <button
-              disabled={page === 0}
-              onClick={() => setPage(p => p - 1)}
+              disabled={safePage === 0}
+              onClick={() => setPage(safePage - 1)}
               className="text-sm text-stone-600 hover:text-stone-800 disabled:opacity-30 disabled:cursor-not-allowed"
             >← Previous</button>
             <span className="text-xs text-stone-400">
-              Page {page + 1} of {totalPages} · {processed.length.toLocaleString()} reviews
+              Page {safePage + 1} of {totalPages} · {processed.length.toLocaleString()} reviews
             </span>
             <button
-              disabled={page >= totalPages - 1}
-              onClick={() => setPage(p => p + 1)}
+              disabled={safePage >= totalPages - 1}
+              onClick={() => setPage(safePage + 1)}
               className="text-sm text-stone-600 hover:text-stone-800 disabled:opacity-30 disabled:cursor-not-allowed"
             >Next →</button>
           </div>

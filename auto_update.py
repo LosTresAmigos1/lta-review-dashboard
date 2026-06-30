@@ -47,6 +47,34 @@ LOCATIONS = [
 FIELDNAMES = ["location_name", "city", "reviewer_name", "review_date",
               "star_rating", "review_text", "owner_response", "review_url"]
 
+# The same underlying Google review shows up under different review_url formats
+# depending on which pipeline scraped it: Takeout/API exports use
+# "?placeid=<id>", this Playwright scraper uses "/reviews/<id>". Comparing the
+# raw URL string causes the same review to be treated as two different rows
+# (a confirmed source of duplicate rows in dashboard/reviews.csv). Extracting
+# just the ID lets every pipeline dedupe against every other pipeline.
+_PLACEID_RE = re.compile(r'placeid=([^&]+)')
+_MAPS_ID_RE = re.compile(r'/reviews/([^/?]+)')
+
+
+def canonical_review_id(url: str):
+    if not url:
+        return None
+    m = _PLACEID_RE.search(url)
+    if m:
+        return m.group(1)
+    m = _MAPS_ID_RE.search(url)
+    if m:
+        return m.group(1)
+    return None
+
+
+def dedup_key(row: dict):
+    rid = canonical_review_id(row.get("review_url", ""))
+    if rid:
+        return rid
+    return (row["location_name"], row["reviewer_name"], row["review_date"], row["star_rating"])
+
 
 def relative_to_date(text: str) -> str:
     now = datetime.now()
@@ -155,8 +183,11 @@ async def extract_from_dom(page, seen_ids: set) -> list:
             for sel in ['.CDe7pd .MyEned span[jslog]', '.CDe7pd span']:
                 re_el = await el.query_selector(sel)
                 if re_el:
-                    owner_resp = (await re_el.inner_text()).strip()
-                    if owner_resp:
+                    candidate = (await re_el.inner_text()).strip()
+                    # Some selectors match the "Response from the owner" UI
+                    # label itself rather than the actual reply text.
+                    if candidate and candidate.lower() != "response from the owner":
+                        owner_resp = candidate
                         break
 
             if name or text:
@@ -341,42 +372,38 @@ async def scrape_location(context, loc) -> list:
 
 
 def load_existing() -> set:
-    """Return a set of known review_urls (primary key) plus fallback combos for rows without a URL."""
+    """Return a set of canonical review-id keys (or location/reviewer/date/star fallback) for rows already saved."""
     if not REVIEWS_CSV.exists():
         return set()
     keys = set()
     with REVIEWS_CSV.open(encoding="utf-8") as f:
         for r in csv.DictReader(f):
-            url = r.get("review_url", "").strip()
-            if url:
-                keys.add(url)
-            else:
-                keys.add((r["location_name"], r["reviewer_name"], r["review_date"], r["star_rating"]))
+            keys.add(dedup_key(r))
     return keys
 
 
 def is_duplicate(row: dict, existing_keys: set) -> bool:
-    url = row.get("review_url", "").strip()
-    if url:
-        return url in existing_keys
-    return (row["location_name"], row["reviewer_name"], row["review_date"], row["star_rating"]) in existing_keys
+    return dedup_key(row) in existing_keys
 
 
 def append_to_csv(new_rows: list):
     with REVIEWS_CSV.open(encoding="utf-8") as f:
         existing = list(csv.DictReader(f))
-    # Deduplicate the combined set by URL before writing
-    seen = set()
-    combined = []
+    # Deduplicate the combined set by canonical review id before writing.
+    # Prefer the more complete row when the same review appears twice
+    # (e.g. one copy has a real owner reply, the other has none/placeholder).
+    def score(r):
+        return (2 if r.get("owner_response") else 0) + (1 if r.get("review_text") else 0)
+
+    best = {}
     for r in existing + new_rows:
-        key = r.get("review_url", "").strip() or (r["location_name"], r["reviewer_name"], r["review_date"], r["star_rating"])
-        if key not in seen:
-            seen.add(key)
-            combined.append(r)
+        key = dedup_key(r)
+        if key not in best or score(r) > score(best[key]):
+            best[key] = r
     with REVIEWS_CSV.open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=FIELDNAMES, quoting=csv.QUOTE_ALL)
         w.writeheader()
-        w.writerows(combined)
+        w.writerows(best.values())
 
 
 def build_email_html(new_rows: list) -> str:
@@ -466,8 +493,7 @@ async def main():
 
     new_rows = []
     for r in all_scraped:
-        url = r.get("review_url", "").strip()
-        key = url if url else (r["location_name"], r["reviewer_name"], r["review_date"], r["star_rating"])
+        key = dedup_key(r)
         if key not in existing:
             new_rows.append(r)
             existing.add(key)

@@ -8,6 +8,7 @@ import ReviewExplorer from './pages/ReviewExplorer.jsx'
 import Rankings      from './pages/Rankings.jsx'
 import ActionItems, { useUnansweredCount } from './pages/ActionItems.jsx'
 import Insights from './pages/Insights.jsx'
+import DataValidation from './pages/DataValidation.jsx'
 import {
   filterReviews, getDefaultDateRange, getDateBounds, ymLabel,
 } from './utils/dataUtils.js'
@@ -62,7 +63,7 @@ export default function App() {
 
   return (
     <Layout page={page} onPage={setPage} dataWindow={dataWindow} allReviews={allReviews} unansweredCount={unansweredCount}>
-      {page !== 'actions' && page !== 'insights' && (
+      {page !== 'actions' && page !== 'insights' && page !== 'validation' && (
         <>
           <div className="mb-6">
             <GlobalFilters allReviews={allReviews} filters={filters} onChange={setFilters} />
@@ -82,6 +83,7 @@ export default function App() {
       {page === 'rankings'  && <Rankings       allReviews={allReviews} filtered={filtered} prevFiltered={prevFiltered} />}
       {page === 'actions'   && <ActionItems    allReviews={allReviews} />}
       {page === 'insights'  && <Insights       allReviews={allReviews} />}
+      {page === 'validation' && <DataValidation allReviews={allReviews} />}
     </Layout>
   )
 }

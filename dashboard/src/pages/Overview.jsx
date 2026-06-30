@@ -39,7 +39,8 @@ function GoalTracker({ allReviews }) {
   }, [allReviews, goals])
 
   function saveGoal(loc, raw) {
-    const val = Math.min(5, Math.max(1, parseFloat(raw) || DEFAULT_GOAL))
+    const parsed = parseFloat(raw)
+    const val = Math.min(5, Math.max(1, Number.isNaN(parsed) ? DEFAULT_GOAL : parsed))
     const next = { ...goals, [loc]: +val.toFixed(1) }
     setGoals(next)
     localStorage.setItem('lta_goals', JSON.stringify(next))

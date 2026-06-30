@@ -7,6 +7,7 @@ const TABS = [
   { id: 'rankings',   label: 'Rankings'         },
   { id: 'actions',    label: 'Action Items'     },
   { id: 'insights',   label: 'Insights'         },
+  { id: 'validation', label: 'Data Validation'  },
 ]
 
 export default function Layout({ page, onPage, dataWindow, allReviews, unansweredCount, children }) {

@@ -1,10 +1,11 @@
 // ── Brand detection ───────────────────────────────────────────────────────────
-export const BRANDS = ['Los Tres Amigos', 'Los Tres Mex Grill', 'Mi Lindo San Blas', 'Rio Luna']
+export const BRANDS = ['Los Tres Amigos', 'Los Tres Mex Grill', 'Mi Lindo San Blas', 'Rio Luna', 'Casa Tequila']
 const BRAND_COLORS  = {
   'Los Tres Amigos':    '#d97706',
   'Los Tres Mex Grill': '#0369a1',
   'Mi Lindo San Blas':  '#7c3aed',
   'Rio Luna':           '#be185d',
+  'Casa Tequila':       '#15803d',
   'Other':              '#57534e',
 }
 

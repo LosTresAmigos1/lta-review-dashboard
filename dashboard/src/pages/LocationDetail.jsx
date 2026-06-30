@@ -119,7 +119,7 @@ function InsightPanel({ reviews }) {
   )
 }
 
-function LocationCard({ stat, periodReviews, isSelected, onSelect }) {
+function LocationCard({ stat, isSelected, onSelect }) {
   const sent = stat.periodSentiment
   return (
     <article
@@ -195,7 +195,6 @@ export default function LocationDetail({ allReviews, filtered }) {
           <LocationCard
             key={stat.name}
             stat={stat}
-            periodReviews={filtered.filter(r => r.location_name === stat.name)}
             isSelected={selectedLocation === stat.name}
             onSelect={() => handleSelect(stat.name)}
           />
