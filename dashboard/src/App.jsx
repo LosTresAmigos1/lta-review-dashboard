@@ -1,17 +1,25 @@
-import { useState, useMemo, useEffect } from 'react'
+import { useMemo, useEffect, useState } from 'react'
+import { Routes, Route, Navigate, Outlet, useLocation, useOutletContext } from 'react-router-dom'
+import { AnimatePresence, motion } from 'framer-motion'
 import Layout        from './components/Layout.jsx'
 import GlobalFilters from './components/GlobalFilters.jsx'
+import Skeleton       from './components/ui/Skeleton.jsx'
 import Overview      from './pages/Overview.jsx'
 import LocationDetail from './pages/LocationDetail.jsx'
 import ReviewExplorer from './pages/ReviewExplorer.jsx'
-import Rankings      from './pages/Rankings.jsx'
+import TrendsAnalytics from './pages/TrendsAnalytics.jsx'
 import ActionItems, { useUnansweredCount } from './pages/ActionItems.jsx'
-import Insights from './pages/Insights.jsx'
-import DataValidation from './pages/DataValidation.jsx'
+import ScraperStatus from './pages/ScraperStatus.jsx'
+import Reports from './pages/Reports.jsx'
 import { useReviewsData } from './hooks/useReviewsData.js'
 import {
   filterReviews, getDefaultDateRange, getDateBounds, ymLabel,
 } from './utils/dataUtils.js'
+
+// Routes that don't use the shared GlobalFilters bar (they operate on the
+// full lifetime dataset, or a fixed trailing-7-day window, rather than the
+// global filterable period).
+const NO_FILTER_BAR_PATHS = ['/actions', '/scraper-status', '/reports']
 
 function buildDefaultFilters(reviews) {
   const dr = getDefaultDateRange(reviews)
@@ -26,13 +34,11 @@ function buildDefaultFilters(reviews) {
   }
 }
 
-export default function App() {
+function RootLayout() {
   const { data: allReviews, isLoading, isError } = useReviewsData()
-  const [page,    setPage]    = useState('overview')
   const [filters, setFilters] = useState(null)
+  const location = useLocation()
 
-  // Default filters depend on the loaded data's date bounds, so they're set
-  // once the chunked fetch resolves rather than synchronously at import time.
   useEffect(() => {
     if (allReviews && !filters) setFilters(buildDefaultFilters(allReviews))
   }, [allReviews, filters])
@@ -72,7 +78,10 @@ export default function App() {
   if (isLoading || !filters) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-stone-50">
-        <p className="text-stone-400 text-sm">Loading reviews…</p>
+        <div className="w-64 space-y-3">
+          <Skeleton className="h-4 w-40 mx-auto" />
+          <Skeleton className="h-3 w-56 mx-auto" />
+        </div>
       </div>
     )
   }
@@ -85,9 +94,11 @@ export default function App() {
     )
   }
 
+  const showFilterBar = !NO_FILTER_BAR_PATHS.includes(location.pathname)
+
   return (
-    <Layout page={page} onPage={setPage} dataWindow={dataWindow} allReviews={allReviews} unansweredCount={unansweredCount}>
-      {page !== 'actions' && page !== 'insights' && page !== 'validation' && (
+    <Layout dataWindow={dataWindow} allReviews={allReviews} unansweredCount={unansweredCount}>
+      {showFilterBar && (
         <>
           <div className="mb-6">
             <GlobalFilters allReviews={allReviews} filters={filters} onChange={setFilters} />
@@ -101,13 +112,46 @@ export default function App() {
         </>
       )}
 
-      {page === 'overview'  && <Overview       allReviews={allReviews} filtered={filtered} />}
-      {page === 'locations' && <LocationDetail allReviews={allReviews} filtered={filtered} />}
-      {page === 'explorer'  && <ReviewExplorer allReviews={allReviews} filtered={filtered} />}
-      {page === 'rankings'  && <Rankings       allReviews={allReviews} filtered={filtered} prevFiltered={prevFiltered} />}
-      {page === 'actions'   && <ActionItems    allReviews={allReviews} />}
-      {page === 'insights'  && <Insights       allReviews={allReviews} />}
-      {page === 'validation' && <DataValidation allReviews={allReviews} />}
+      <AnimatePresence mode="wait">
+        <motion.div
+          key={location.pathname}
+          initial={{ opacity: 0, y: 6 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -6 }}
+          transition={{ duration: 0.15 }}
+        >
+          <Outlet context={{ allReviews, filtered, prevFiltered, filters }} />
+        </motion.div>
+      </AnimatePresence>
     </Layout>
   )
 }
+
+export default function App() {
+  return (
+    <Routes>
+      <Route element={<RootLayout />}>
+        <Route index element={<Navigate to="/overview" replace />} />
+        <Route path="overview"       element={<RouteOverview />} />
+        <Route path="locations"      element={<RouteLocations />} />
+        <Route path="explorer"       element={<RouteExplorer />} />
+        <Route path="actions"        element={<RouteActions />} />
+        <Route path="trends"         element={<RouteTrends />} />
+        <Route path="scraper-status" element={<RouteScraperStatus />} />
+        <Route path="reports"        element={<Reports />} />
+        {/* Legacy paths from the pre-Milestone-5 nav — redirect to their new merged homes */}
+        <Route path="rankings"   element={<Navigate to="/trends" replace />} />
+        <Route path="insights"   element={<Navigate to="/trends" replace />} />
+        <Route path="validation" element={<Navigate to="/scraper-status" replace />} />
+        <Route path="*" element={<Navigate to="/overview" replace />} />
+      </Route>
+    </Routes>
+  )
+}
+
+function RouteOverview()      { const { allReviews, filtered } = useOutletContext(); return <Overview allReviews={allReviews} filtered={filtered} /> }
+function RouteLocations()     { const { allReviews, filtered, filters } = useOutletContext(); return <LocationDetail allReviews={allReviews} filtered={filtered} filters={filters} /> }
+function RouteExplorer()      { const { allReviews, filtered } = useOutletContext(); return <ReviewExplorer allReviews={allReviews} filtered={filtered} /> }
+function RouteTrends()        { const { allReviews, filtered, prevFiltered } = useOutletContext(); return <TrendsAnalytics allReviews={allReviews} filtered={filtered} prevFiltered={prevFiltered} /> }
+function RouteActions()       { const { allReviews } = useOutletContext(); return <ActionItems allReviews={allReviews} /> }
+function RouteScraperStatus() { const { allReviews } = useOutletContext(); return <ScraperStatus allReviews={allReviews} /> }

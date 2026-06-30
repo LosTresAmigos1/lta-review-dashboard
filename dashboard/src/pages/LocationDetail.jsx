@@ -174,10 +174,10 @@ function LocationCard({ stat, isSelected, onSelect }) {
   )
 }
 
-export default function LocationDetail({ allReviews, filtered }) {
+export default function LocationDetail({ allReviews, filtered, filters }) {
   const [selectedLocation, setSelectedLocation] = useState(null)
 
-  const stats = useMemo(() => getLocationStats(allReviews, filtered), [allReviews, filtered])
+  const stats = useMemo(() => getLocationStats(allReviews, filtered, filters), [allReviews, filtered, filters])
   const selectedStat = stats.find(s => s.name === selectedLocation)
   const locationReviews = useMemo(
     () => filtered.filter(r => r.location_name === selectedLocation),

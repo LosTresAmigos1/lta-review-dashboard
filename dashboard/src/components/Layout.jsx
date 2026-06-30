@@ -1,16 +1,17 @@
+import { NavLink } from 'react-router-dom'
 import NewReviewsPanel from './NewReviewsPanel.jsx'
 
 const TABS = [
-  { id: 'overview',   label: 'Overview'         },
-  { id: 'locations',  label: 'Locations'        },
-  { id: 'explorer',   label: 'Review Explorer'  },
-  { id: 'rankings',   label: 'Rankings'         },
-  { id: 'actions',    label: 'Action Items'     },
-  { id: 'insights',   label: 'Insights'         },
-  { id: 'validation', label: 'Data Validation'  },
+  { id: 'overview',  path: '/overview',  label: 'Overview'           },
+  { id: 'locations', path: '/locations', label: 'Locations'          },
+  { id: 'explorer',  path: '/explorer',  label: 'All Reviews'        },
+  { id: 'actions',   path: '/actions',   label: 'Needs Attention'    },
+  { id: 'trends',    path: '/trends',    label: 'Trends & Analytics' },
+  { id: 'scraper',   path: '/scraper-status', label: 'Scraper Status' },
+  { id: 'reports',   path: '/reports',   label: 'Reports'            },
 ]
 
-export default function Layout({ page, onPage, dataWindow, allReviews, unansweredCount, children }) {
+export default function Layout({ dataWindow, allReviews, unansweredCount, children }) {
   return (
     <div className="min-h-screen flex flex-col">
       {/* Header */}
@@ -35,12 +36,11 @@ export default function Layout({ page, onPage, dataWindow, allReviews, unanswere
           <ul className="flex gap-1 overflow-x-auto" role="tablist">
             {TABS.map(t => (
               <li key={t.id} role="presentation">
-                <button
+                <NavLink
+                  to={t.path}
                   role="tab"
-                  aria-selected={page === t.id}
-                  onClick={() => onPage(t.id)}
-                  className={`relative px-4 py-2.5 text-sm font-medium whitespace-nowrap border-b-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 ${
-                    page === t.id
+                  className={({ isActive }) => `relative block px-4 py-2.5 text-sm font-medium whitespace-nowrap border-b-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 ${
+                    isActive
                       ? 'border-amber-400 text-white'
                       : 'border-transparent text-stone-400 hover:text-stone-200 hover:border-stone-500'
                   }`}
@@ -51,7 +51,7 @@ export default function Layout({ page, onPage, dataWindow, allReviews, unanswere
                       {unansweredCount > 99 ? '99+' : unansweredCount}
                     </span>
                   )}
-                </button>
+                </NavLink>
               </li>
             ))}
           </ul>

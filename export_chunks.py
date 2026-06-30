@@ -16,9 +16,20 @@ rather than pre-aggregated form.
 """
 import json
 import re
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 import db
+
+STOP_WORDS = {
+    'a','an','the','is','are','was','were','be','been','have','has','had',
+    'do','does','did','will','would','could','should','to','of','in','for',
+    'on','with','at','by','from','and','or','but','not','this','that','it',
+    'its','we','you','he','she','they','i','me','us','him','her','our',
+    'just','got','go','get','came','come','also','very','really','good',
+    'great','nice','bad','ok','okay','food','place','restaurant','time',
+    'service','staff','always','never','still','now','even','back','out',
+}
 
 PUBLIC_DATA_DIR = db.BASE_DIR / "dashboard" / "public" / "data"
 
@@ -127,6 +138,66 @@ def export_validation(conn) -> None:
     write_json("validation.json", [dict(r) for r in rows])
 
 
+def top_complaint_words(rows, n=8):
+    words = Counter()
+    for r in rows:
+        text = (r["review_text"] or "").lower()
+        text = re.sub(r"[^a-z\s]", " ", text)
+        for w in text.split():
+            if len(w) > 3 and w not in STOP_WORDS:
+                words[w] += 1
+    return words.most_common(n)
+
+
+def export_weekly_report(conn, locations: dict) -> None:
+    """Ports weekly_report.py's metrics (not its HTML) into a JSON chunk so
+    the Reports page can render the same numbers the Monday email already
+    sends, without re-reading reviews.csv client-side."""
+    rows = conn.execute(
+        """SELECT r.*, l.id AS loc_id, l.name AS location_name
+           FROM reviews r JOIN locations l ON l.id = r.location_id
+           WHERE r.is_deleted = 0"""
+    ).fetchall()
+
+    now = datetime.now(timezone.utc)
+    d7  = (now - timedelta(days=7)).date().isoformat()
+    d30 = (now - timedelta(days=30)).date().isoformat()
+    d60 = (now - timedelta(days=60)).date().isoformat()
+
+    new_reviews = [r for r in rows if r["review_date"] and r["review_date"] >= d7]
+    by_location = dict(Counter(r["location_name"] for r in new_reviews))
+
+    avg_now, avg_prev = {}, {}
+    for loc in locations.values():
+        cur  = [r["star_rating"] for r in rows if r["loc_id"] == loc["id"]
+                and r["review_date"] and r["review_date"] >= d30]
+        prev = [r["star_rating"] for r in rows if r["loc_id"] == loc["id"]
+                and r["review_date"] and d60 <= r["review_date"] < d30]
+        if cur:  avg_now[loc["name"]]  = sum(cur) / len(cur)
+        if prev: avg_prev[loc["name"]] = sum(prev) / len(prev)
+
+    unanswered = sum(
+        1 for r in rows
+        if r["star_rating"] is not None and r["star_rating"] <= 2 and not (r["owner_response"] or "").strip()
+    )
+
+    neg_this_week = [r for r in new_reviews if r["star_rating"] is not None and r["star_rating"] <= 2]
+    complaints = top_complaint_words(neg_this_week) if neg_this_week else []
+
+    week_str = f"Week of {(now - timedelta(days=7)).strftime('%B %d')} – {now.strftime('%B %d, %Y')}"
+
+    write_json("reports/weekly-summary.json", {
+        "weekStr": week_str,
+        "generatedAt": now.isoformat(),
+        "totalNew": len(new_reviews),
+        "byLocation": by_location,
+        "avgNow": avg_now,
+        "avgPrev": avg_prev,
+        "unanswered": unanswered,
+        "complaints": complaints,
+    })
+
+
 def export_scraper_status(conn) -> None:
     runs = conn.execute("SELECT * FROM scraper_runs ORDER BY id DESC LIMIT 30").fetchall()
     run_list = []
@@ -151,6 +222,7 @@ def main():
     export_action_items(conn, locations)
     export_validation(conn)
     export_scraper_status(conn)
+    export_weekly_report(conn, locations)
 
     conn.close()
     files = list(PUBLIC_DATA_DIR.rglob("*.json"))

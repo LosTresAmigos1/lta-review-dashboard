@@ -121,19 +121,26 @@ export function getMonthlyTrend(reviews) {
 }
 
 // ── Location stats ────────────────────────────────────────────────────────────
-export function getLocationStats(allReviews, periodReviews) {
+// `filters` (optional) lets the sparkline respect brand/location/star filters
+// and anchor its trailing 6-month window to the selected period's end date,
+// instead of always showing the lifetime trend regardless of active filters.
+export function getLocationStats(allReviews, periodReviews, filters) {
+  const sparkSource = filters
+    ? filterReviews(allReviews, { brands: filters.brands, locations: filters.locations, stars: filters.stars, end: filters.end })
+    : allReviews
   const locs = [...new Set(allReviews.map(r => r.location_name))].sort()
   return locs.map(name => {
     const all    = allReviews.filter(r => r.location_name === name)
     const period = periodReviews.filter(r => r.location_name === name)
+    const spark_all = sparkSource.filter(r => r.location_name === name)
     const city   = all[0]?.city || ''
     const brand  = getBrand(name)
     const lifetimeRating = all.length ? +(all.reduce((s, r) => s + r.star_rating, 0) / all.length).toFixed(2) : null
     const periodSentiment = getSentiment(period)
     // Star breakdown 1-5 for period
     const starBreakdown = [1,2,3,4,5].map(s => ({ star: s, count: period.filter(r => r.star_rating === s).length }))
-    // Sparkline: last 6 months
-    const spark = buildSparkline(all)
+    // Sparkline: last 6 months up to the selected period's end, honoring brand/location/star filters
+    const spark = buildSparkline(spark_all)
     return {
       name, city, brand,
       lifetimeRating,

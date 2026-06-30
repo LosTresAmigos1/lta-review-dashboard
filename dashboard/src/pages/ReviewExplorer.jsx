@@ -1,5 +1,6 @@
 import { useState, useMemo } from 'react'
 import { getBrand } from '../utils/dataUtils.js'
+import { useToast } from '../components/ui/Toast.jsx'
 
 const PAGE_SIZE = 50
 
@@ -30,6 +31,7 @@ function StarBadge({ n }) {
 }
 
 export default function ReviewExplorer({ filtered }) {
+  const showToast = useToast()
   const [sortKey,  setSortKey]  = useState('review_date')
   const [sortDir,  setSortDir]  = useState('desc')
   const [keyword,  setKeyword]  = useState('')
@@ -108,7 +110,7 @@ export default function ReviewExplorer({ filtered }) {
         </label>
         <span className="text-xs text-stone-400">{processed.length.toLocaleString()} results</span>
         <button
-          onClick={() => exportCSV(processed)}
+          onClick={() => { exportCSV(processed); showToast(`Exported ${processed.length.toLocaleString()} reviews`) }}
           className="ml-auto flex items-center gap-1.5 text-xs font-medium text-stone-600 bg-stone-100 hover:bg-stone-200 border border-stone-200 px-3 py-1.5 rounded-lg transition-colors"
           title={`Export ${processed.length.toLocaleString()} reviews as CSV`}
         >
