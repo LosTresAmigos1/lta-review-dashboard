@@ -1,4 +1,5 @@
-import { useMemo, useState, useCallback, useEffect } from 'react'
+import { useMemo, useState, useCallback } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import ComplaintIntelligence from '../components/ComplaintIntelligence.jsx'
 
 // ── Date windows ──────────────────────────────────────────────────────────────
@@ -78,6 +79,28 @@ function deadlineLabel(r) {
 
 function shortLoc(name = '') {
   return name.replace('Los Tres Amigos ', 'LTA ').replace('Los Tres Mex Grill ', 'LTMG ')
+}
+
+// Best available Google link for a review. Google does not expose stable
+// individual review permalinks — the review_url links to the business's
+// reviews page. When no URL is stored, fall back to a Google search.
+function buildReviewLink(review) {
+  if (review.review_url) {
+    return {
+      href: review.review_url,
+      label: 'View on Google',
+      title: 'Opens the business reviews page on Google (Google does not provide individual review links)',
+    }
+  }
+  const q = [
+    review.location_name,
+    review.reviewer_name && `"${review.reviewer_name}"`,
+  ].filter(Boolean).join(' ') + ' google review'
+  return {
+    href: `https://www.google.com/search?q=${encodeURIComponent(q)}`,
+    label: 'Search on Google',
+    title: 'No direct link stored — searches Google to find this review',
+  }
 }
 
 function generateResponse(review) {
@@ -250,6 +273,14 @@ function ReviewCard({ review, priority, tier, onGenerateResponse, onMarkResponde
         </div>
       )}
 
+      {/* Owner response preview (shown when response was detected in data) */}
+      {review.owner_response && (
+        <div className="mt-2 mb-3 pl-3 border-l-2 border-emerald-300 bg-emerald-50 rounded-r-xl p-2">
+          <p className="text-[10px] font-bold text-emerald-700 uppercase tracking-wide mb-0.5">Response Detected</p>
+          <p className="text-xs text-emerald-800 leading-relaxed line-clamp-2">{review.owner_response}</p>
+        </div>
+      )}
+
       {/* Actions */}
       <div className="flex items-center gap-2 pt-2 border-t border-stone-100/60 flex-wrap">
         <button
@@ -264,16 +295,20 @@ function ReviewCard({ review, priority, tier, onGenerateResponse, onMarkResponde
         >
           ✓ Mark Responded
         </button>
-        {review.review_url && (
-          <a
-            href={review.review_url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center gap-1 text-xs text-stone-400 hover:text-stone-700 transition-colors"
-          >
-            Open on Google ↗
-          </a>
-        )}
+        {(() => {
+          const link = buildReviewLink(review)
+          return (
+            <a
+              href={link.href}
+              target="_blank"
+              rel="noopener noreferrer"
+              title={link.title}
+              className="flex items-center gap-1 text-xs text-stone-400 hover:text-stone-700 transition-colors"
+            >
+              {link.label} ↗
+            </a>
+          )
+        })()}
       </div>
     </div>
   )
@@ -281,11 +316,14 @@ function ReviewCard({ review, priority, tier, onGenerateResponse, onMarkResponde
 
 // ── Action Queue (main new section) ──────────────────────────────────────────
 function ActionQueue({ allReviews }) {
-  const [windowKey,   setWindowKey]   = useState(DEFAULT_WINDOW)
-  const [locFilter,   setLocFilter]   = useState('All')
-  const [showArchive, setShowArchive] = useState(false)
-  const [modalReview, setModalReview] = useState(null)
-  const [responded,   setResponded]   = useState(() => {
+  const queryClient = useQueryClient()
+  const [windowKey,    setWindowKey]    = useState(DEFAULT_WINDOW)
+  const [locFilter,    setLocFilter]    = useState('All')
+  const [replyFilter,  setReplyFilter]  = useState('unanswered') // 'unanswered' | 'replied' | 'critical'
+  const [showArchive,  setShowArchive]  = useState(false)
+  const [modalReview,  setModalReview]  = useState(null)
+  const [refreshing,   setRefreshing]   = useState(false)
+  const [responded,    setResponded]    = useState(() => {
     try { return new Set(JSON.parse(localStorage.getItem('lta_responded') || '[]')) }
     catch { return new Set() }
   })
@@ -298,6 +336,12 @@ function ActionQueue({ allReviews }) {
       return next
     })
   }, [])
+
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true)
+    await queryClient.invalidateQueries({ queryKey: ['all-reviews'] })
+    setRefreshing(false)
+  }, [queryClient])
 
   const windowDays = WINDOWS.find(w => w.key === windowKey)?.days ?? 90
 
@@ -314,6 +358,12 @@ function ActionQueue({ allReviews }) {
   // All unanswered reviews (excl. already responded via localStorage)
   const allUnanswered = useMemo(() =>
     allReviews.filter(r => !r.owner_response?.trim() && !responded.has(reviewKey(r))),
+    [allReviews, responded]
+  )
+
+  // Replied reviews (have a detected owner_response OR manually marked)
+  const allReplied = useMemo(() =>
+    allReviews.filter(r => r.owner_response?.trim() || responded.has(reviewKey(r))),
     [allReviews, responded]
   )
 
@@ -387,18 +437,54 @@ function ActionQueue({ allReviews }) {
 
       <section>
         {/* Header */}
-        <div className="flex items-center gap-3 mb-2">
-          <div className="w-1 h-6 bg-red-500 rounded-full" />
-          <h2 className="text-lg font-bold text-stone-800">Action Required</h2>
-          {inWindow.length > 0 && (
-            <span className="bg-red-100 text-red-700 text-xs font-bold px-2 py-0.5 rounded-full">
-              {inWindow.length} need response
-            </span>
-          )}
+        <div className="flex items-start justify-between gap-3 mb-2 flex-wrap">
+          <div className="flex items-center gap-3">
+            <div className="w-1 h-6 bg-red-500 rounded-full" />
+            <h2 className="text-lg font-bold text-stone-800">Action Required</h2>
+            {inWindow.length > 0 && replyFilter === 'unanswered' && (
+              <span className="bg-red-100 text-red-700 text-xs font-bold px-2 py-0.5 rounded-full">
+                {inWindow.length} need response
+              </span>
+            )}
+          </div>
+          <button
+            onClick={handleRefresh}
+            disabled={refreshing}
+            title="Re-fetch review data from the server to pick up any recently scraped changes"
+            className="flex items-center gap-1.5 text-xs text-stone-500 hover:text-stone-800 border border-stone-200 hover:border-stone-400 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50"
+          >
+            {refreshing ? '⟳ Refreshing…' : '⟳ Refresh Response Status'}
+          </button>
         </div>
-        <p className="text-sm text-stone-500 mb-5">
+        <p className="text-sm text-stone-500 mb-4">
           Reviews sorted by priority score — a mix of star rating, age, and reviewer status. Respond first to the highest-scoring reviews.
         </p>
+
+        {/* Reply status filter tabs */}
+        <div className="flex gap-1.5 flex-wrap mb-4">
+          {[
+            { key: 'unanswered', label: 'Not Replied', count: allUnanswered.length },
+            { key: 'critical',   label: 'Needs Attention', count: (groups.critical?.length ?? 0) + (groups.high?.length ?? 0) },
+            { key: 'replied',    label: 'Replied', count: allReplied.length },
+          ].map(f => (
+            <button
+              key={f.key}
+              onClick={() => setReplyFilter(f.key)}
+              className={`flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-full border transition-colors ${
+                replyFilter === f.key
+                  ? f.key === 'replied'
+                    ? 'bg-emerald-600 text-white border-emerald-600'
+                    : 'bg-stone-800 text-white border-stone-800'
+                  : 'bg-white text-stone-600 border-stone-200 hover:border-stone-400'
+              }`}
+            >
+              {f.label}
+              <span className={`text-[10px] font-bold rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1 ${
+                replyFilter === f.key ? 'bg-white/20' : 'bg-stone-100 text-stone-500'
+              }`}>{f.count}</span>
+            </button>
+          ))}
+        </div>
 
         {/* Date window filter */}
         <div className="flex gap-1.5 flex-wrap mb-5">
@@ -436,72 +522,145 @@ function ActionQueue({ allReviews }) {
           ))}
         </div>
 
-        {/* Dashboard cards */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
-          {[
-            { label: 'Need Response ASAP',    value: (groups.critical?.length ?? 0) + (groups.high?.length ?? 0), color: 'text-red-600',    bg: 'bg-red-50',    border: 'border-red-200'    },
-            { label: 'Negative Reviews',       value: stats.neg,                                                   color: 'text-orange-600', bg: 'bg-orange-50', border: 'border-orange-200' },
-            { label: 'Overdue (14+ days)',     value: stats.overdue,                                               color: 'text-amber-700',  bg: 'bg-amber-50',  border: 'border-amber-200'  },
-            { label: 'Archived',               value: archived.length,                                             color: 'text-stone-500',  bg: 'bg-stone-50',  border: 'border-stone-200'  },
-          ].map(c => (
-            <div key={c.label} className={`${c.bg} border ${c.border} rounded-2xl p-4 text-center`}>
-              <p className={`text-2xl font-bold tabular-nums ${c.color}`}>{c.value}</p>
-              <p className="text-xs text-stone-500 mt-0.5 leading-snug">{c.label}</p>
-            </div>
-          ))}
-        </div>
-
-        {/* Smart recommendations */}
-        {recommendations.length > 0 && (
-          <div className="bg-stone-900 rounded-2xl p-4 mb-6 space-y-2">
-            {recommendations.map((r, i) => (
-              <div key={i} className="flex items-start gap-2 text-sm">
-                <span className="shrink-0 text-base leading-5">{r.icon}</span>
-                <span className="text-stone-300">{r.text}</span>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* Priority groups */}
-        {inWindow.length === 0 ? (
-          <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-10 text-center">
-            <div className="text-3xl mb-2">✓</div>
-            <p className="text-emerald-700 font-semibold">No unanswered reviews in this period.</p>
-            <p className="text-emerald-600 text-sm mt-1">Expand the window or check "All Time" to see older reviews.</p>
-          </div>
-        ) : (
-          <div className="space-y-8">
-            {PRIORITY_TIERS.map(tier => {
-              const tierReviews = groups[tier.id] || []
-              if (tierReviews.length === 0) return null
-              return (
-                <div key={tier.id}>
-                  <div className="flex items-center gap-2 mb-3">
-                    <h3 className="text-sm font-bold text-stone-700">{tier.label}</h3>
-                    <span className="text-xs text-stone-400">({tierReviews.length})</span>
-                  </div>
-                  <div className="space-y-3">
-                    {tierReviews.map(r => (
-                      <ReviewCard
-                        key={reviewKey(r)}
-                        review={r}
-                        priority={r._score}
-                        tier={tier}
-                        onGenerateResponse={setModalReview}
-                        onMarkResponded={markResponded}
-                        isResponded={responded.has(reviewKey(r))}
-                      />
-                    ))}
-                  </div>
+        {/* Dashboard cards — only shown in unanswered/critical modes */}
+        {replyFilter !== 'replied' && (
+          <>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+              {[
+                { label: 'Need Response ASAP',    value: (groups.critical?.length ?? 0) + (groups.high?.length ?? 0), color: 'text-red-600',    bg: 'bg-red-50',    border: 'border-red-200'    },
+                { label: 'Negative Reviews',       value: stats.neg,                                                   color: 'text-orange-600', bg: 'bg-orange-50', border: 'border-orange-200' },
+                { label: 'Overdue (14+ days)',     value: stats.overdue,                                               color: 'text-amber-700',  bg: 'bg-amber-50',  border: 'border-amber-200'  },
+                { label: 'Archived',               value: archived.length,                                             color: 'text-stone-500',  bg: 'bg-stone-50',  border: 'border-stone-200'  },
+              ].map(c => (
+                <div key={c.label} className={`${c.bg} border ${c.border} rounded-2xl p-4 text-center`}>
+                  <p className={`text-2xl font-bold tabular-nums ${c.color}`}>{c.value}</p>
+                  <p className="text-xs text-stone-500 mt-0.5 leading-snug">{c.label}</p>
                 </div>
-              )
-            })}
+              ))}
+            </div>
+
+            {/* Smart recommendations */}
+            {recommendations.length > 0 && (
+              <div className="bg-stone-900 rounded-2xl p-4 mb-6 space-y-2">
+                {recommendations.map((r, i) => (
+                  <div key={i} className="flex items-start gap-2 text-sm">
+                    <span className="shrink-0 text-base leading-5">{r.icon}</span>
+                    <span className="text-stone-300">{r.text}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+
+        {/* ── Replied view ── */}
+        {replyFilter === 'replied' && (
+          <div>
+            <p className="text-xs text-stone-400 mb-3">
+              Showing {allReplied.length.toLocaleString()} responded reviews — either detected automatically or marked manually.
+            </p>
+            {allReplied.length === 0 ? (
+              <div className="bg-stone-50 border border-stone-200 rounded-2xl p-10 text-center">
+                <p className="text-stone-500 font-medium">No responded reviews found.</p>
+                <p className="text-xs text-stone-400 mt-1">Responses are detected automatically from the scraper or when you click "Mark Responded."</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {allReplied
+                  .filter(r => locFilter === 'All' || r.location_name === locFilter)
+                  .sort((a, b) => (b.review_date || '').localeCompare(a.review_date || ''))
+                  .slice(0, 100)
+                  .map(r => (
+                    <div key={reviewKey(r)} className="bg-white border border-emerald-200 rounded-2xl p-4 shadow-sm">
+                      <div className="flex items-start gap-3">
+                        <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-1 rounded-full shrink-0 mt-0.5">
+                          ✓ Responded
+                        </span>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-semibold text-stone-800 text-sm">{r.reviewer_name || 'Anonymous'}</span>
+                            <Stars n={Number(r.star_rating)} />
+                          </div>
+                          <div className="flex items-center gap-2 mt-0.5">
+                            <span className="text-xs text-stone-400">{shortLoc(r.location_name)}</span>
+                            <span className="text-stone-200">·</span>
+                            <span className="text-xs text-stone-400">{r.review_date}</span>
+                          </div>
+                          {r.review_text && <p className="text-xs text-stone-600 mt-1 line-clamp-2">{r.review_text}</p>}
+                          {r.owner_response && (
+                            <div className="mt-2 pl-3 border-l-2 border-emerald-300 bg-emerald-50 rounded-r-xl p-2">
+                              <p className="text-[10px] font-bold text-emerald-700 uppercase tracking-wide mb-0.5">Owner Response</p>
+                              <p className="text-xs text-emerald-800 line-clamp-2">{r.owner_response}</p>
+                            </div>
+                          )}
+                        </div>
+                        {(() => {
+                          const link = buildReviewLink(r)
+                          return (
+                            <a href={link.href} target="_blank" rel="noopener noreferrer"
+                               title={link.title}
+                               className="text-xs text-stone-400 hover:text-stone-700 transition-colors shrink-0">
+                              {link.label} ↗
+                            </a>
+                          )
+                        })()}
+                      </div>
+                    </div>
+                  ))
+                }
+                {allReplied.length > 100 && (
+                  <p className="text-xs text-stone-400 text-center py-2">Showing 100 of {allReplied.length} replied reviews.</p>
+                )}
+              </div>
+            )}
           </div>
         )}
 
-        {/* Archived section */}
-        {archived.length > 0 && (
+        {/* ── Priority queue (unanswered / needs attention) ── */}
+        {replyFilter !== 'replied' && (
+          <>
+            {inWindow.length === 0 ? (
+              <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-10 text-center">
+                <div className="text-3xl mb-2">✓</div>
+                <p className="text-emerald-700 font-semibold">No unanswered reviews in this period.</p>
+                <p className="text-emerald-600 text-sm mt-1">Expand the window or check "All Time" to see older reviews.</p>
+              </div>
+            ) : (
+              <div className="space-y-8">
+                {PRIORITY_TIERS.map(tier => {
+                  const tierReviews = groups[tier.id] || []
+                  // In "Needs Attention" mode only show critical + high
+                  if (replyFilter === 'critical' && tier.id !== 'critical' && tier.id !== 'high') return null
+                  if (tierReviews.length === 0) return null
+                  return (
+                    <div key={tier.id}>
+                      <div className="flex items-center gap-2 mb-3">
+                        <h3 className="text-sm font-bold text-stone-700">{tier.label}</h3>
+                        <span className="text-xs text-stone-400">({tierReviews.length})</span>
+                      </div>
+                      <div className="space-y-3">
+                        {tierReviews.map(r => (
+                          <ReviewCard
+                            key={reviewKey(r)}
+                            review={r}
+                            priority={r._score}
+                            tier={tier}
+                            onGenerateResponse={setModalReview}
+                            onMarkResponded={markResponded}
+                            isResponded={responded.has(reviewKey(r))}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </>
+        )}
+
+        {/* Archived section — only in unanswered/critical modes */}
+        {replyFilter !== 'replied' && archived.length > 0 && (
           <div className="mt-8">
             <button
               onClick={() => setShowArchive(s => !s)}

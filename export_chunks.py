@@ -50,12 +50,18 @@ def review_to_dict(r, loc) -> dict:
         "reviewer_name": r["reviewer_name"], "review_date": r["review_date"],
         "star_rating": r["star_rating"], "review_text": r["review_text"],
         "owner_response": r["owner_response"], "review_url": r["review_url"],
+        "response_status": "responded" if (r["owner_response"] or "").strip() else "unanswered",
+        "review_id": db.canonical_review_id(r["review_url"] or "") or "",
+        "last_checked_at": r["last_seen_at"] or "",
     }
 
 
 def export_meta(conn, locations: dict) -> None:
     loc_list = [
-        {"name": l["name"], "city": l["city"], "brand": l["brand"], "slug": slugify(l["name"])}
+        {
+            "name": l["name"], "city": l["city"], "brand": l["brand"],
+            "slug": slugify(l["name"]), "maps_url": l.get("maps_url") or "",
+        }
         for l in locations.values()
     ]
     total = conn.execute("SELECT COUNT(*) AS c FROM reviews WHERE is_deleted = 0").fetchone()["c"]

@@ -160,20 +160,39 @@ def get_connection() -> sqlite3.Connection:
 
 def init_schema(conn: sqlite3.Connection):
     conn.executescript(SCHEMA)
+    _migrate_schema(conn)
     conn.commit()
 
 
-def get_or_create_location(conn, name: str, city: str = "", brand: str = "", search_query: str = "") -> int:
+def _migrate_schema(conn: sqlite3.Connection):
+    """Apply additive schema migrations that can't go in CREATE TABLE IF NOT EXISTS."""
+    migrations = [
+        "ALTER TABLE locations ADD COLUMN maps_url TEXT",
+    ]
+    for sql in migrations:
+        try:
+            conn.execute(sql)
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+
+
+def get_or_create_location(conn, name: str, city: str = "", brand: str = "", search_query: str = "", maps_url: str = "") -> int:
     row = conn.execute("SELECT id FROM locations WHERE name = ?", (name,)).fetchone()
     if row:
-        conn.execute(
-            "UPDATE locations SET city = ?, brand = ?, search_query = ? WHERE id = ?",
-            (city, brand, search_query, row["id"]),
-        )
+        if maps_url:
+            conn.execute(
+                "UPDATE locations SET city = ?, brand = ?, search_query = ?, maps_url = ? WHERE id = ?",
+                (city, brand, search_query, maps_url, row["id"]),
+            )
+        else:
+            conn.execute(
+                "UPDATE locations SET city = ?, brand = ?, search_query = ? WHERE id = ?",
+                (city, brand, search_query, row["id"]),
+            )
         return row["id"]
     cur = conn.execute(
-        "INSERT INTO locations (name, city, brand, search_query) VALUES (?, ?, ?, ?)",
-        (name, city, brand, search_query),
+        "INSERT INTO locations (name, city, brand, search_query, maps_url) VALUES (?, ?, ?, ?, ?)",
+        (name, city, brand, search_query, maps_url or None),
     )
     return cur.lastrowid
 
@@ -213,12 +232,19 @@ def upsert_review(conn, location_id: int, location_name: str, row: dict, now: st
              str(new_val) if new_val is not None else None),
         )
 
+    # Preserve existing non-empty values when the scraper returns empty — this
+    # prevents a missed CSS selector on re-scrape from clearing a response that
+    # was already captured and stored.
+    new_response = (row.get("owner_response") or "").strip()
+    final_response = new_response if new_response else (existing["owner_response"] or "")
+    new_text = (row.get("review_text") or "").strip()
+    final_text = new_text if new_text else (existing["review_text"] or "")
+
     conn.execute(
         """UPDATE reviews SET review_text = ?, owner_response = ?, star_rating = ?,
            last_seen_at = ?, missing_since = NULL, is_deleted = 0, deleted_detected_at = NULL
            WHERE id = ?""",
-        (row.get("review_text", existing["review_text"]),
-         row.get("owner_response", existing["owner_response"]),
+        (final_text, final_response,
          row.get("star_rating") or existing["star_rating"],
          now, existing["id"]),
     )

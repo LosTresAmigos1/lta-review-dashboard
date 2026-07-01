@@ -7,13 +7,19 @@ import Button from '../components/ui/Button.jsx'
 const PAGE_SIZE = 50
 
 function exportCSV(rows) {
-  const headers = ['Date','Location','City','Stars','Reviewer','Review','Owner Response','Review URL']
+  const headers = [
+    'Date','Location','City','Stars','Reviewer',
+    'Review','Owner Response','Response Status',
+    'Review URL','Review ID','Last Checked At',
+  ]
   const escape  = v => `"${(v ?? '').toString().replace(/"/g, '""')}"`
   const lines   = [
     headers.join(','),
     ...rows.map(r => [
       r.review_date, r.location_name, r.city, r.star_rating,
-      r.reviewer_name, r.review_text, r.owner_response, r.review_url,
+      r.reviewer_name, r.review_text, r.owner_response,
+      r.response_status || (r.owner_response ? 'responded' : 'unanswered'),
+      r.review_url, r.review_id || '', r.last_checked_at || '',
     ].map(escape).join(',')),
   ]
   const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' })
@@ -25,6 +31,26 @@ function exportCSV(rows) {
   a.click()
   document.body.removeChild(a)
   URL.revokeObjectURL(url)
+}
+
+// Google does not expose stable individual review deep links. The best we can
+// do is link to the business's review page (review_url) or fall back to a
+// Google Search that can surface the review in search results.
+function buildReviewLink(r) {
+  if (r.review_url) {
+    return {
+      href: r.review_url,
+      label: 'View ↗',
+      title: 'Opens the business reviews page on Google (Google does not provide individual review links)',
+    }
+  }
+  const q = [r.location_name, r.reviewer_name && `"${r.reviewer_name}"`]
+    .filter(Boolean).join(' ') + ' google review'
+  return {
+    href: `https://www.google.com/search?q=${encodeURIComponent(q)}`,
+    label: 'Search ↗',
+    title: 'No direct URL stored — searches Google to find this review',
+  }
 }
 
 function StarBadge({ n }) {
@@ -150,11 +176,11 @@ export default function ReviewExplorer({ filtered }) {
               {visible.map((r, i) => {
                 const key = `${r.review_url || i}`
                 const isExpanded = expanded === key
-                const missingReply = !r.owner_response
+                const needsReply = !r.owner_response && Number(r.star_rating) <= 2
                 return (
                   <tr
                     key={key}
-                    className={`hover:bg-stone-50 transition-colors ${missingReply ? 'border-l-2 border-l-orange-300' : ''}`}
+                    className={`hover:bg-stone-50 transition-colors ${needsReply ? 'border-l-2 border-l-orange-300' : ''}`}
                   >
                     <td className="px-3 py-3 text-xs text-stone-500 whitespace-nowrap">{r.review_date}</td>
                     <td className="px-3 py-3">
@@ -179,26 +205,37 @@ export default function ReviewExplorer({ filtered }) {
                     </td>
                     <td className="px-3 py-3 max-w-[160px]">
                       {r.owner_response
-                        ? <p className="text-xs text-stone-500 line-clamp-2 italic">{r.owner_response}</p>
+                        ? (
+                          <div>
+                            <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded-full mb-1">
+                              ✓ Responded
+                            </span>
+                            <p className="text-xs text-stone-500 line-clamp-2 italic">{r.owner_response}</p>
+                          </div>
+                        )
                         : (
-                          <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-orange-500 bg-orange-50 px-2 py-0.5 rounded-full">
+                          <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-orange-500 bg-orange-50 px-2 py-0.5 rounded-full" title="No owner response has been recorded for this review">
                             <span aria-hidden="true">!</span> No reply
                           </span>
                         )
                       }
                     </td>
                     <td className="px-3 py-3">
-                      {r.review_url && (
-                        <a
-                          href={r.review_url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-[10px] text-amber-600 hover:text-amber-800 underline whitespace-nowrap"
-                          aria-label={`Open Google review by ${r.reviewer_name}`}
-                        >
-                          View ↗
-                        </a>
-                      )}
+                      {(() => {
+                        const link = buildReviewLink(r)
+                        return (
+                          <a
+                            href={link.href}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-[10px] text-amber-600 hover:text-amber-800 underline whitespace-nowrap"
+                            title={link.title}
+                            aria-label={`${link.label} — ${r.reviewer_name}`}
+                          >
+                            {link.label}
+                          </a>
+                        )
+                      })()}
                     </td>
                   </tr>
                 )

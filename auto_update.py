@@ -183,15 +183,54 @@ async def extract_from_dom(page, seen_ids: set) -> list:
                         break
 
             owner_resp = ""
-            for sel in ['.CDe7pd .MyEned span[jslog]', '.CDe7pd span']:
-                re_el = await el.query_selector(sel)
-                if re_el:
-                    candidate = (await re_el.inner_text()).strip()
-                    # Some selectors match the "Response from the owner" UI
-                    # label itself rather than the actual reply text.
-                    if candidate and candidate.lower() != "response from the owner":
-                        owner_resp = candidate
-                        break
+            # Strategy 1: JavaScript evaluation — most resilient to CSS class churn.
+            # Finds the owner-response container by class OR by label text, strips
+            # the "Response from the owner" header, and returns the reply body.
+            try:
+                owner_resp = (await el.evaluate("""el => {
+                    const HEADER = 'response from the owner';
+                    const candidates = [
+                        el.querySelector('.CDe7pd'),
+                        el.querySelector('.mTHi3d'),
+                        el.querySelector('[data-reply-id]'),
+                    ].filter(Boolean);
+                    if (candidates.length === 0) {
+                        for (const node of el.querySelectorAll('*')) {
+                            const t = (node.innerText || '').trim().toLowerCase();
+                            if (t === HEADER && node.parentElement) {
+                                candidates.push(node.parentElement);
+                                break;
+                            }
+                        }
+                    }
+                    for (const section of candidates) {
+                        const full = (section.innerText || '').trim();
+                        const cleaned = full
+                            .replace(/^response from the owner[\\s\\n]*/i, '')
+                            .replace(/\\s*See (more|less)\\s*$/i, '')
+                            .trim();
+                        if (cleaned && cleaned.toLowerCase() !== HEADER) return cleaned;
+                    }
+                    return '';
+                }""")) or ""
+            except Exception:
+                pass
+
+            # Strategy 2: CSS selector fallback
+            if not owner_resp:
+                for sel in [
+                    '.CDe7pd .MyEned span[jslog]',
+                    '.CDe7pd .MyEned span',
+                    '.CDe7pd span',
+                    '.mTHi3d span',
+                    '[data-reply-id] span',
+                ]:
+                    re_el = await el.query_selector(sel)
+                    if re_el:
+                        candidate = (await re_el.inner_text()).strip()
+                        if candidate and candidate.lower() != "response from the owner":
+                            owner_resp = candidate
+                            break
 
             if name or text:
                 new_reviews.append({
@@ -371,9 +410,10 @@ async def scroll_reviews(page, max_reviews=200):
 
 
 async def scrape_location(context, loc) -> tuple:
-    """Returns (reviews, error_message). error_message is None on success
-    (including the legitimate zero-new-reviews case) so callers can tell
-    "found nothing" apart from "the scrape itself failed"."""
+    """Returns (reviews, error_message, maps_url).
+    error_message is None on success so callers can tell "found nothing" apart
+    from "the scrape itself failed". maps_url is the Google Maps place URL
+    captured after navigating to the reviews tab (empty string if unavailable)."""
     name = loc["name"]
     search = loc["search"]
     print(f"  Scraping: {name}")
@@ -419,15 +459,22 @@ async def scrape_location(context, loc) -> tuple:
                     tabs_found = "unknown"
                 msg = f"Reviews tab not found (tabs visible: {tabs_found})"
                 print(f"    [SKIP] {msg}")
-                return [], msg
+                return [], msg, ""
+
+        # Capture the Maps place URL now that we're on the reviews tab —
+        # stored per-location so the dashboard can link directly to the business.
+        maps_url = page.url or ""
+        if maps_url.startswith("https://www.google.com/maps/search/"):
+            maps_url = ""  # still on search page, not the place panel
 
         await sort_by_newest(page)
         reviews = await scroll_and_extract(page, MAX_SCROLL)
-        print(f"    -> {len(reviews)} reviews scraped")
-        return reviews, None
+        with_resp = sum(1 for r in reviews if r.get("owner_response"))
+        print(f"    -> {len(reviews)} reviews scraped, {with_resp} with owner response")
+        return reviews, None, maps_url
     except Exception as e:
         print(f"    [ERR] {e}")
-        return [], str(e)
+        return [], str(e), ""
     finally:
         await page.close()
 
@@ -552,7 +599,7 @@ async def main():
         for loc in LOCATIONS:
             run_stats["attempted"] += 1
             loc_started = datetime.now(timezone.utc)
-            reviews, error = await scrape_location(context, loc)
+            reviews, error, maps_url = await scrape_location(context, loc)
             duration_ms = int((datetime.now(timezone.utc) - loc_started).total_seconds() * 1000)
 
             loc_rows = [{
@@ -570,7 +617,8 @@ async def main():
             # Dual-write into SQLite (source of truth going forward) alongside
             # the CSV write below (kept as a secondary, human-readable export).
             location_id = db.get_or_create_location(
-                conn, loc["name"], loc["city"], db.get_brand(loc["name"]), loc["search"]
+                conn, loc["name"], loc["city"], db.get_brand(loc["name"]), loc["search"],
+                maps_url=maps_url,
             )
             now_iso = datetime.now(timezone.utc).isoformat()
             scraped_keys = set()
