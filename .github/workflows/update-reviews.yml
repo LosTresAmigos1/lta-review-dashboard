@@ -21,7 +21,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install Python dependencies
-        run: pip install playwright
+        run: pip install playwright anthropic
 
       - name: Install Playwright browsers
         run: playwright install chromium --with-deps
@@ -29,6 +29,8 @@ jobs:
       - name: Run scraper
         id: scrape
         run: python auto_update.py
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
       - name: Upload debug snapshots
         if: always()
@@ -46,6 +48,8 @@ jobs:
       - name: Refresh analytics
         if: always()
         run: python refresh_analytics.py
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
       - name: Send alert notifications
         if: always()

@@ -1,0 +1,221 @@
+"""
+ai_engine.py — Claude API integration for generative intelligence.
+
+All AI content is generated server-side during pipeline runs and stored
+in analytics_cache. The static Vercel frontend fetches pre-computed JSON —
+no API key is ever exposed to the browser.
+
+Cost estimate at 4 runs/day:
+  • 1 company summary  (Sonnet) × 4 = ~$0.004/day
+  • 21 location summaries (Haiku)  × 4 = ~$0.006/day
+  • Response drafts: incremental, only new unresponded ≤3★ reviews
+  Total: well under $1/month
+"""
+import hashlib
+import json
+import os
+
+_client = None
+
+
+def _get_client():
+    global _client
+    if _client is not None:
+        return _client
+    key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not key:
+        return None
+    try:
+        import anthropic
+        _client = anthropic.Anthropic(api_key=key)
+    except ImportError:
+        print("[ai] anthropic package not installed — AI features disabled")
+    return _client
+
+
+def _call(prompt: str, model: str = "claude-haiku-4-5-20251001", max_tokens: int = 400) -> str | None:
+    client = _get_client()
+    if not client:
+        return None
+    try:
+        import anthropic
+        msg = client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return msg.content[0].text.strip()
+    except Exception as e:
+        print(f"[ai] Claude call failed: {e}")
+        return None
+
+
+def _data_hash(data: dict) -> str:
+    return hashlib.md5(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()[:12]
+
+
+# ---------------------------------------------------------------------------
+# Company executive summary
+# ---------------------------------------------------------------------------
+
+def generate_company_summary(data: dict) -> dict | None:
+    """
+    data keys: period_reviews, avg_rating, rating_delta, positive_pct, negative_pct,
+               unanswered_count, best_location, best_rating, worst_location, worst_rating,
+               top_complaint, top_praise, locations_above_4, locations_below_4
+    Returns {"text": str, "hash": str} or None if AI unavailable.
+    """
+    h = _data_hash(data)
+    prompt = f"""You are an analytics assistant for Los Tres Amigos, a Mexican restaurant group with {data.get('total_locations', 21)} locations.
+
+Write a 4-5 sentence executive intelligence summary based on these metrics. Write in present tense. Be specific and use the actual numbers. Do not use bullet points, headers, or markdown. Plain paragraphs only. Focus on what management should know and act on today.
+
+Metrics (last 30 days):
+- Reviews received: {data['period_reviews']}
+- Average rating: {data['avg_rating']:.2f}★ ({data['rating_delta']:+.2f} vs prior 30 days)
+- Guest sentiment: {data['positive_pct']:.0f}% positive, {data['negative_pct']:.0f}% negative
+- Reviews awaiting owner response: {data['unanswered_count']}
+- Top-performing location: {data['best_location']} ({data['best_rating']:.1f}★)
+- Location needing attention: {data['worst_location']} ({data['worst_rating']:.1f}★)
+- Most common complaint theme: {data['top_complaint']}
+- Most common praise theme: {data['top_praise']}
+- Locations rated 4★+: {data.get('locations_above_4', 'N/A')}
+
+Write the executive summary now:"""
+
+    text = _call(prompt, model="claude-sonnet-4-6", max_tokens=350)
+    if text is None:
+        return None
+    return {"text": text, "hash": h, "generatedAt": _now_iso()}
+
+
+# ---------------------------------------------------------------------------
+# Location intelligence summary
+# ---------------------------------------------------------------------------
+
+def generate_location_summary(data: dict) -> dict | None:
+    """
+    data keys: location_name, period_reviews, avg_rating, rating_delta,
+               positive_pct, top_complaint, top_praise, praised_staff,
+               unanswered_negative, prediction_30d
+    """
+    h = _data_hash(data)
+    praised = ", ".join(data.get("praised_staff", [])[:3]) or "none identified"
+    pred = data.get("prediction_30d")
+    pred_str = f"Projected 30-day rating: {pred:.2f}★" if pred else "Insufficient data for projection"
+
+    prompt = f"""You are an analytics assistant for Los Tres Amigos restaurant group.
+
+Write a 3-sentence operational summary for the {data['location_name']} location. Be specific. Plain text only — no bullets, no headers.
+
+Location metrics (last 30 days):
+- Reviews: {data['period_reviews']}
+- Average rating: {data['avg_rating']:.2f}★ ({data.get('rating_delta', 0):+.2f} vs prior period)
+- Guest sentiment: {data['positive_pct']:.0f}% positive
+- Top complaint: {data['top_complaint'] or 'none identified'}
+- Top praise: {data['top_praise'] or 'none identified'}
+- Staff praised by name: {praised}
+- Unanswered negative reviews: {data['unanswered_negative']}
+- {pred_str}
+
+Write the location summary now:"""
+
+    text = _call(prompt, model="claude-haiku-4-5-20251001", max_tokens=200)
+    if text is None:
+        return None
+    return {"text": text, "hash": h, "generatedAt": _now_iso()}
+
+
+# ---------------------------------------------------------------------------
+# Response drafts
+# ---------------------------------------------------------------------------
+
+def generate_response_draft(review: dict, restaurant_name: str) -> str | None:
+    """Generate a professional owner-response draft for a single review."""
+    stars = review.get("star_rating") or 3
+    reviewer = (review.get("reviewer_name") or "Guest").split()[0]  # first name only
+    text = (review.get("review_text") or "").strip()
+
+    if stars <= 2:
+        tone = "sincere, apologetic, and solution-focused. Acknowledge the specific issue without being defensive"
+    elif stars == 3:
+        tone = "warm and appreciative while acknowledging there is room to improve"
+    else:
+        tone = "genuinely grateful and enthusiastic"
+
+    if not text:
+        prompt = f"""Write a 1-2 sentence response from the owner of {restaurant_name} to a {stars}-star Google review with no text from {reviewer}. Tone: {tone}. Sign off with '— The {restaurant_name} Team'. No emojis."""
+    else:
+        prompt = f"""You are the owner of {restaurant_name}, a Mexican restaurant.
+
+Write a professional, genuine 2-3 sentence response to this {stars}-star Google review. Tone: {tone}. Address {reviewer} by first name. Do not offer discounts or freebies. Do not use emojis. Sign off with '— The {restaurant_name} Team'.
+
+Review: {text[:400]}
+
+Write the response now:"""
+
+    return _call(prompt, model="claude-haiku-4-5-20251001", max_tokens=160)
+
+
+# ---------------------------------------------------------------------------
+# Batch response draft generation
+# ---------------------------------------------------------------------------
+
+def batch_generate_drafts(
+    reviews: list, location_map: dict, existing_hashes: set, limit: int = 100
+) -> dict:
+    """
+    Generate response drafts for unresponded ≤3★ reviews that don't already
+    have a cached draft. Returns {review_id: draft_text}.
+    """
+    client = _get_client()
+    if not client:
+        return {}
+
+    candidates = [
+        r for r in reviews
+        if not (r.get("owner_response") or "").strip()
+        and (r.get("star_rating") or 5) <= 3
+        and r.get("review_text")
+    ]
+    # Newest first, cap to limit
+    candidates.sort(key=lambda r: r.get("review_date") or "", reverse=True)
+    candidates = candidates[:limit]
+
+    results = {}
+    for r in candidates:
+        rid = r.get("review_id") or r.get("review_url") or ""
+        if not rid:
+            continue
+        h = _data_hash({"text": r.get("review_text", ""), "stars": r.get("star_rating")})
+        cache_key = f"draft_{rid[:40]}_{h}"
+        if cache_key in existing_hashes:
+            continue
+        loc = location_map.get(r.get("location_id"), {})
+        restaurant_name = loc.get("name", "Los Tres Amigos")
+        draft = generate_response_draft(r, restaurant_name)
+        if draft:
+            results[cache_key] = {
+                "review_id": rid,
+                "location_id": r.get("location_id"),
+                "star_rating": r.get("star_rating"),
+                "reviewer_name": r.get("reviewer_name"),
+                "review_text": r.get("review_text", "")[:300],
+                "draft": draft,
+                "generatedAt": _now_iso(),
+            }
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
+def is_available() -> bool:
+    return _get_client() is not None

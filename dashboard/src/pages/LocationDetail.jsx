@@ -1,301 +1,370 @@
 import { useMemo, useState } from 'react'
-import { AnimatePresence, motion } from 'framer-motion'
-import { ResponsiveContainer, LineChart, Line, Tooltip } from 'recharts'
-import { getLocationStats, fmtPct, fmtRating, getBrandColor, isUnverified } from '../utils/dataUtils.js'
-import { extractInsights } from '../utils/textAnalysis.js'
-import ConfidenceBadge from '../components/ConfidenceBadge.jsx'
+import { useNavigate } from 'react-router-dom'
+import { ResponsiveContainer, LineChart, Line, Tooltip, BarChart, Bar, XAxis, YAxis, CartesianGrid } from 'recharts'
+import Card from '../components/ui/Card.jsx'
+import Badge from '../components/ui/Badge.jsx'
+import HealthRing from '../components/ui/HealthRing.jsx'
+import Skeleton from '../components/ui/Skeleton.jsx'
+import EmptyState from '../components/ui/EmptyState.jsx'
+import { useLocationStats, useLocationDetail } from '../hooks/useIntelligence.js'
 
-const STAR_COLORS = ['#ef4444','#f97316','#fbbf24','#6ee7b7','#10b981']
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function StarBar({ breakdown }) {
-  const max = Math.max(...breakdown.map(d => d.count), 1)
+function slugify(name) {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+}
+
+const STAR_COLORS = ['#ef4444','#f97316','#fbbf24','#84cc16','#22c55e']
+
+// ─── Sub-components ───────────────────────────────────────────────────────────
+
+function StarBreakdown({ breakdown }) {
+  const max = Math.max(...(breakdown ?? []).map(d => d.count), 1)
   return (
-    <div className="space-y-1">
-      {[...breakdown].reverse().map(d => (
-        <div key={d.star} className="flex items-center gap-2 text-xs">
-          <span className="w-4 text-right text-stone-500">{d.star}★</span>
-          <div className="flex-1 bg-stone-100 rounded-full h-2 overflow-hidden">
-            <div
-              className="h-full rounded-full"
-              style={{ width: `${(d.count / max) * 100}%`, backgroundColor: STAR_COLORS[d.star - 1] }}
-            />
+    <div className="space-y-1.5">
+      {[...(breakdown ?? [])].reverse().map(d => (
+        <div key={d.star} className="flex items-center gap-2">
+          <span className="text-[10px] font-medium w-5 text-right flex-shrink-0"
+                style={{ color: 'var(--color-text-3)' }}>
+            {d.star}★
+          </span>
+          <div className="flex-1 h-2 rounded-full overflow-hidden"
+               style={{ background: 'var(--color-border)' }}>
+            <div className="h-2 rounded-full transition-all"
+                 style={{ width: `${(d.count / max) * 100}%`, background: STAR_COLORS[d.star - 1] }} />
           </div>
-          <span className="w-6 text-right text-stone-500">{d.count}</span>
+          <span className="text-[10px] w-5 flex-shrink-0"
+                style={{ color: 'var(--color-text-3)' }}>
+            {d.count}
+          </span>
         </div>
       ))}
     </div>
   )
 }
 
-function Sparkline({ data }) {
-  if (!data || data.length < 2) return <span className="text-xs text-stone-300">—</span>
+function TrendChart({ trend }) {
+  if (!trend?.length) return <div className="skeleton h-32 w-full" />
+  const last18 = trend.slice(-18)
   return (
-    <ResponsiveContainer width={80} height={32}>
-      <LineChart data={data} margin={{ top: 2, right: 2, left: 2, bottom: 2 }}>
-        <Line type="monotone" dataKey="avg" stroke="#bb9230" strokeWidth={1.5} dot={false} connectNulls />
+    <ResponsiveContainer width="100%" height={100}>
+      <LineChart data={last18}>
+        <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
+        <XAxis dataKey="ym" tick={{ fontSize: 9, fill: 'var(--color-text-3)' }}
+               tickFormatter={v => v.slice(5)} interval="preserveStartEnd" />
+        <YAxis domain={[1, 5]} tick={{ fontSize: 9, fill: 'var(--color-text-3)' }} width={24} />
         <Tooltip
-          content={({ active, payload }) =>
-            active && payload?.length
-              ? <div className="bg-white border border-stone-200 rounded text-xs px-2 py-1 shadow">{payload[0].payload.ym}: {payload[0].value}</div>
-              : null
-          }
+          contentStyle={{ fontSize: 11, border: '1px solid var(--color-border)', borderRadius: 8, boxShadow: 'var(--shadow-md)' }}
+          formatter={(v) => [v ? `${v}★` : '—', 'Avg']}
         />
+        <Line type="monotone" dataKey="avg" stroke="var(--color-accent)"
+              strokeWidth={2.5} dot={{ r: 2, fill: 'var(--color-accent)' }} connectNulls />
       </LineChart>
     </ResponsiveContainer>
   )
 }
 
-function InsightChip({ label, count }) {
+function AISummaryCard({ detail }) {
+  if (!detail?.aiSummary?.text) return null
   return (
-    <span className="inline-flex items-center gap-1.5 bg-stone-100 text-stone-700 text-xs font-medium px-2.5 py-1 rounded-full">
-      {label}
-      <span className="bg-stone-300 text-stone-600 rounded-full w-4 h-4 flex items-center justify-center text-[10px] font-bold">{count}</span>
-    </span>
-  )
-}
-
-function SnippetModal({ title, items, onClose }) {
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-label={title}>
-      <div className="absolute inset-0 bg-stone-900/40" onClick={onClose} />
-      <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[80vh] flex flex-col">
-        <div className="flex items-center justify-between p-5 border-b border-stone-100">
-          <h3 className="font-semibold text-stone-800">{title}</h3>
-          <button onClick={onClose} className="text-stone-400 hover:text-stone-600 text-xl leading-none" aria-label="Close">×</button>
-        </div>
-        <div className="overflow-y-auto p-5 space-y-4">
-          {items.map((r, i) => (
-            <div key={i} className="bg-stone-50 rounded-lg p-3 text-sm">
-              <div className="flex items-center gap-2 mb-1.5">
-                <span className="text-amber-500">{'★'.repeat(r.star_rating)}{'☆'.repeat(5 - r.star_rating)}</span>
-                <span className="text-stone-400 text-xs">{r.review_date}</span>
-                <span className="text-stone-500 text-xs">{r.reviewer_name}</span>
-              </div>
-              <p className="text-stone-700 leading-relaxed">{r.review_text || <em className="text-stone-400">No text</em>}</p>
-            </div>
-          ))}
-        </div>
-      </div>
+    <div className="ai-card p-5">
+      <p className="ai-label mb-2">✦ AI Location Summary</p>
+      <p className="text-sm leading-relaxed" style={{ color: '#D4C9BC' }}>
+        {detail.aiSummary.text}
+      </p>
     </div>
   )
 }
 
-function InsightPanel({ reviews }) {
-  const insights = useMemo(() => extractInsights(reviews), [reviews])
-  const [modal, setModal] = useState(null)
+function PredictionCard({ detail }) {
+  const pred  = detail?.predictedRating
+  const vol   = detail?.predictedVolume
+  const alert = detail?.trendAlert
+
+  if (!pred && !vol) return null
 
   return (
-    <div className="mt-4 space-y-4">
-      {modal && <SnippetModal title={modal.title} items={modal.items} onClose={() => setModal(null)} />}
-
-      {[
-        { key: 'positiveThemes', label: '👍 Positive Themes', data: insights.positiveThemes, mapFn: d => ({ label: d.theme, count: d.count, items: d.reviews }) },
-        { key: 'complaints',     label: '👎 Complaints',       data: insights.complaints,     mapFn: d => ({ label: d.theme, count: d.count, items: d.reviews }) },
-        { key: 'staffNames',     label: '👤 Staff Mentioned',  data: insights.staffNames,     mapFn: d => ({ label: d.name,  count: d.count, items: d.reviews }) },
-        { key: 'menuItems',      label: '🍽 Menu Mentions',    data: insights.menuItems,      mapFn: d => ({ label: d.item,  count: d.count, items: d.reviews }) },
-      ].map(({ key, label, data, mapFn }) => (
-        data.length > 0 && (
-          <div key={key}>
-            <p className="text-xs font-semibold text-stone-500 mb-2">{label}</p>
-            <div className="flex flex-wrap gap-2">
-              {data.map((d, i) => {
-                const m = mapFn(d)
-                return (
-                  <button
-                    key={i}
-                    onClick={() => m.items.length > 0 && setModal({ title: m.label, items: m.items })}
-                    className="hover:opacity-80 transition-opacity"
-                    aria-label={`${m.label} — ${m.count} mentions`}
-                    title="Click for supporting reviews"
-                  >
-                    <InsightChip label={m.label} count={m.count} />
-                  </button>
-                )
-              })}
-            </div>
+    <Card className="p-4">
+      <p className="text-label mb-3" style={{ color: 'var(--color-text-2)' }}>30-Day Forecast</p>
+      <div className="grid grid-cols-2 gap-3">
+        {pred && (
+          <div>
+            <p className="text-[10px] uppercase tracking-wider" style={{ color: 'var(--color-text-3)' }}>Projected Rating</p>
+            <p className="text-2xl font-black mt-0.5"
+               style={{ color: pred >= 4.0 ? 'var(--color-success)' : pred < 3.5 ? 'var(--color-danger)' : 'var(--color-text-1)', fontWeight: 800 }}>
+              {pred}★
+            </p>
           </div>
-        )
+        )}
+        {vol && (
+          <div>
+            <p className="text-[10px] uppercase tracking-wider" style={{ color: 'var(--color-text-3)' }}>Projected Reviews</p>
+            <p className="text-2xl font-black mt-0.5" style={{ color: 'var(--color-text-1)', fontWeight: 800 }}>
+              ~{vol}
+            </p>
+          </div>
+        )}
+      </div>
+      {alert && (
+        <div className="mt-3 flex items-start gap-2 p-3 rounded-lg"
+             style={{ background: 'var(--color-danger-bg)', borderLeft: '3px solid var(--color-danger)' }}>
+          <span>⚡</span>
+          <p className="text-xs" style={{ color: 'var(--color-text-2)' }}>{alert.message}</p>
+        </div>
+      )}
+    </Card>
+  )
+}
+
+function EmployeeRecognition({ staff }) {
+  if (!staff?.length) return null
+  const positive = staff.filter(s => s.sentiment !== 'negative')
+  const negative = staff.filter(s => s.sentiment === 'negative')
+
+  return (
+    <Card className="p-5">
+      <p className="text-label mb-4" style={{ color: 'var(--color-text-2)' }}>Staff Mentions</p>
+      {positive.length > 0 && (
+        <div className="mb-4">
+          <p className="text-[10px] font-bold uppercase tracking-wider mb-2"
+             style={{ color: 'var(--color-success)' }}>
+            Praised by Guests
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {positive.map(s => (
+              <div key={s.name}
+                   className="flex items-center gap-2 px-3 py-1.5 rounded-full"
+                   style={{ background: 'var(--color-success-bg)', border: '1px solid #BBF7D0' }}
+                   title={`${s.name}: ${s.count} mentions`}>
+                <span className="text-xs font-semibold" style={{ color: 'var(--color-success)' }}>
+                  {s.name}
+                </span>
+                <span className="badge badge-success">{s.count}×</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {negative.length > 0 && (
+        <div>
+          <p className="text-[10px] font-bold uppercase tracking-wider mb-2"
+             style={{ color: 'var(--color-danger)' }}>
+            Needs Attention
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {negative.map(s => (
+              <div key={s.name}
+                   className="flex items-center gap-2 px-3 py-1.5 rounded-full"
+                   style={{ background: 'var(--color-danger-bg)', border: '1px solid #FECACA' }}>
+                <span className="text-xs font-semibold" style={{ color: 'var(--color-danger)' }}>
+                  {s.name}
+                </span>
+                <span className="badge badge-danger">{s.count}×</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </Card>
+  )
+}
+
+function ComplaintList({ complaints, type }) {
+  const items = (complaints ?? []).slice(0, 5)
+  const label = type === 'complaint' ? 'Top Complaints' : 'Top Praise'
+  const color = type === 'complaint' ? 'var(--color-danger)' : 'var(--color-success)'
+
+  if (!items.length) return null
+
+  return (
+    <Card className="p-5">
+      <p className="text-label mb-3" style={{ color: 'var(--color-text-2)' }}>{label}</p>
+      <div className="space-y-1.5">
+        {items.map(c => (
+          <div key={c.id}
+               className="flex items-center gap-3 px-3 py-2 rounded-lg"
+               style={{ background: 'var(--color-surface-2)' }}>
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-semibold" style={{ color: 'var(--color-text-1)' }}>{c.name}</p>
+              <p className="text-[10px]" style={{ color: 'var(--color-text-3)' }}>
+                {c.count} mentions
+              </p>
+            </div>
+            <Badge variant={c.trend === 'up' ? (type === 'complaint' ? 'danger' : 'success') : 'neutral'}>
+              {c.trend === 'up' ? '↑' : c.trend === 'down' ? '↓' : '→'}
+            </Badge>
+          </div>
+        ))}
+      </div>
+    </Card>
+  )
+}
+
+// ─── Location picker ──────────────────────────────────────────────────────────
+
+function LocationPicker({ stats, selected, onSelect }) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      {(stats ?? []).map(loc => (
+        <button
+          key={loc.name}
+          onClick={() => onSelect(loc.name)}
+          className="text-xs px-3 py-1.5 rounded-full border transition-all font-medium"
+          style={selected === loc.name
+            ? { background: 'var(--color-accent-lt)', color: 'var(--color-accent)', borderColor: 'var(--color-accent-md)' }
+            : { background: 'var(--color-surface)', color: 'var(--color-text-2)', borderColor: 'var(--color-border)' }}
+        >
+          {loc.name}
+        </button>
       ))}
     </div>
   )
 }
 
-function LocationCard({ stat, isSelected, onSelect }) {
-  const sent = stat.periodSentiment
-  return (
-    <article
-      className={`bg-white border rounded-xl p-4 cursor-pointer shadow-sm transition-all hover:shadow-md hover:-translate-y-0.5 ${
-        isSelected ? 'border-amber-500 ring-2 ring-amber-200 shadow-md' : 'border-stone-200 hover:border-stone-300'
-      }`}
-      onClick={onSelect}
-      role="button"
-      tabIndex={0}
-      onKeyDown={e => e.key === 'Enter' && onSelect()}
-      aria-pressed={isSelected}
-      aria-label={`${stat.name} — ${stat.lifetimeRating} stars lifetime`}
-    >
-      <div className="flex items-start justify-between gap-2 mb-3">
-        <div className="min-w-0">
-          <p className="font-semibold text-stone-800 text-sm leading-tight truncate">{stat.name}</p>
-          <p className="text-xs text-stone-400 mt-0.5">{stat.city || '—'}</p>
+// ─── Location dashboard ───────────────────────────────────────────────────────
+
+function LocationDashboard({ loc, detail, loading }) {
+  if (loading) {
+    return (
+      <div className="space-y-4">
+        <Skeleton className="h-32 w-full" />
+        <div className="grid grid-cols-2 gap-4">
+          <Skeleton className="h-24 w-full" />
+          <Skeleton className="h-24 w-full" />
         </div>
-        <div className="flex flex-col items-end gap-1 flex-shrink-0">
-          {stat.isUnverified && (
-            <span className="inline-flex items-center gap-1 bg-orange-50 text-orange-600 text-[10px] font-semibold px-1.5 py-0.5 rounded-full border border-orange-200">
-              ⚠ Unverified
+        <Skeleton className="h-40 w-full" />
+      </div>
+    )
+  }
+
+  const health = detail?.healthScore ?? loc?.healthScore
+  const sent   = loc?.periodSentiment
+  const avg    = sent?.avgRating
+  const n      = sent?.n ?? 0
+  const breakdown = loc?.starBreakdown
+
+  return (
+    <div className="space-y-4">
+
+      <AISummaryCard detail={detail} />
+
+      {/* KPI strip */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <Card className="p-4 flex flex-col items-center text-center">
+          <HealthRing score={health?.score} grade={health?.grade} size={72} />
+          <p className="text-[10px] font-bold uppercase tracking-wider mt-2"
+             style={{ color: 'var(--color-text-3)' }}>
+            Health Score
+          </p>
+        </Card>
+
+        <Card className="p-4">
+          <p className="text-[10px] font-bold uppercase tracking-wider" style={{ color: 'var(--color-text-3)' }}>
+            Avg Rating (30d)
+          </p>
+          <p className="text-3xl font-black mt-2 mb-1"
+             style={{ color: (avg ?? 0) >= 4 ? 'var(--color-success)' : 'var(--color-text-1)', fontWeight: 800 }}>
+            {avg?.toFixed(2) ?? '—'}★
+          </p>
+          {detail?.ratingDelta !== undefined && detail.ratingDelta !== 0 && (
+            <span className={`text-xs font-semibold ${detail.ratingDelta > 0 ? 'trend-up' : 'trend-down'}`}>
+              {detail.ratingDelta > 0 ? '+' : ''}{detail.ratingDelta} vs prior
             </span>
           )}
-          <span className="inline-block bg-stone-100 text-stone-600 text-[10px] font-semibold px-1.5 py-0.5 rounded-full">
-            {stat.brand}
-          </span>
-        </div>
+        </Card>
+
+        <Card className="p-4">
+          <p className="text-[10px] font-bold uppercase tracking-wider" style={{ color: 'var(--color-text-3)' }}>
+            Positive Sentiment
+          </p>
+          <p className="text-3xl font-black mt-2 mb-1"
+             style={{ color: (sent?.positive ?? 0) >= 75 ? 'var(--color-success)' : 'var(--color-text-1)', fontWeight: 800 }}>
+            {sent ? `${sent.positive.toFixed(0)}%` : '—'}
+          </p>
+          <p className="text-[10px]" style={{ color: 'var(--color-text-3)' }}>
+            {n} reviews this period
+          </p>
+        </Card>
+
+        <PredictionCard detail={detail} />
       </div>
 
-      <div className="flex items-center justify-between mb-3">
-        <div>
-          <p className="text-2xl font-bold text-amber-600">{fmtRating(stat.lifetimeRating)}</p>
-          <p className="text-xs text-stone-400">{stat.lifetimeCount.toLocaleString()} lifetime reviews</p>
-        </div>
-        <Sparkline data={stat.spark} />
+      {/* Charts row */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <Card className="p-5">
+          <p className="text-label mb-3" style={{ color: 'var(--color-text-2)' }}>Rating Trend</p>
+          <TrendChart trend={detail?.monthlyTrend ?? loc?.spark} />
+        </Card>
+        <Card className="p-5">
+          <p className="text-label mb-3" style={{ color: 'var(--color-text-2)' }}>Star Breakdown (30d)</p>
+          <StarBreakdown breakdown={breakdown} />
+        </Card>
       </div>
 
-      <div className="border-t border-stone-100 pt-3 space-y-1.5">
-        <ConfidenceBadge n={sent.n} />
-        {sent.n > 0 && (
-          <div className="flex items-center gap-2 text-xs">
-            <span className="text-emerald-600 font-medium">{fmtPct(sent.positive)}</span>
-            <span className="text-stone-300">|</span>
-            <span className="text-yellow-600">{fmtPct(sent.neutral)}</span>
-            <span className="text-stone-300">|</span>
-            <span className="text-red-500">{fmtPct(sent.bad)}</span>
-          </div>
-        )}
+      {/* Intelligence row */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <ComplaintList complaints={detail?.complaints} type="complaint" />
+        <ComplaintList complaints={detail?.praises} type="praise" />
       </div>
-    </article>
+
+      {/* Employee recognition */}
+      {detail?.staffMentions?.length > 0 && (
+        <EmployeeRecognition staff={detail.staffMentions} />
+      )}
+
+    </div>
   )
 }
 
-export default function LocationDetail({ allReviews, filtered, filters }) {
-  const [selectedLocation, setSelectedLocation] = useState(null)
+// ─── Main ─────────────────────────────────────────────────────────────────────
 
-  const stats = useMemo(() => getLocationStats(allReviews, filtered, filters), [allReviews, filtered, filters])
-  const selectedStat = stats.find(s => s.name === selectedLocation)
-  const locationReviews = useMemo(
-    () => filtered.filter(r => r.location_name === selectedLocation),
-    [filtered, selectedLocation]
+export default function LocationDetail({ allReviews = [], filtered = [], filters = {} }) {
+  const { data: stats, isLoading: lStats } = useLocationStats()
+  const [selected, setSelected] = useState(null)
+
+  const selectedLoc = useMemo(
+    () => stats?.find(s => s.name === selected) ?? stats?.[0] ?? null,
+    [stats, selected]
   )
+  const slug = selectedLoc ? slugify(selectedLoc.name) : null
+  const { data: detail, isLoading: lDetail } = useLocationDetail(slug)
 
-  function handleSelect(name) {
-    setSelectedLocation(prev => prev === name ? null : name)
-  }
+  // Auto-select first on load
+  useMemo(() => {
+    if (!selected && stats?.length) setSelected(stats[0].name)
+  }, [stats, selected])
 
   return (
-    <div className="space-y-6">
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-        {stats.map(stat => (
-          <LocationCard
-            key={stat.name}
-            stat={stat}
-            isSelected={selectedLocation === stat.name}
-            onSelect={() => handleSelect(stat.name)}
-          />
-        ))}
+    <div className="space-y-6 max-w-[1100px]">
+      <div>
+        <h2 className="text-heading" style={{ color: 'var(--color-text-1)' }}>Location Intelligence</h2>
+        <p className="text-sm mt-0.5" style={{ color: 'var(--color-text-2)' }}>
+          Per-location health scores, predictions, staff recognition, and complaint analysis
+        </p>
       </div>
 
-      <AnimatePresence>
-      {selectedStat && (
-        <motion.div
-          key={selectedStat.name}
-          initial={{ opacity: 0, height: 0 }}
-          animate={{ opacity: 1, height: 'auto' }}
-          exit={{ opacity: 0, height: 0 }}
-          transition={{ duration: 0.2 }}
-          style={{ overflow: 'hidden' }}
-        >
-        <div className="bg-white border border-amber-200 rounded-2xl shadow-md p-6">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-bold text-stone-800">{selectedStat.name}</h2>
-            <button
-              onClick={() => setSelectedLocation(null)}
-              className="text-stone-400 hover:text-stone-600 text-xl leading-none transition-colors"
-              aria-label="Close detail panel"
-            >×</button>
-          </div>
-
-          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
-            {/* Star breakdown */}
-            <div>
-              <p className="text-xs font-semibold text-stone-500 uppercase tracking-wide mb-2">Period Star Breakdown</p>
-              <StarBar breakdown={selectedStat.starBreakdown} />
-              <div className="mt-3">
-                <ConfidenceBadge n={selectedStat.periodSentiment.n} />
-              </div>
-            </div>
-
-            {/* Sentiment */}
-            <div>
-              <p className="text-xs font-semibold text-stone-500 uppercase tracking-wide mb-2">Period Sentiment</p>
-              {selectedStat.periodSentiment.n === 0
-                ? <p className="text-sm text-stone-400">No reviews in selected period</p>
-                : (
-                  <div className="space-y-2">
-                    {[
-                      { label: 'Positive', val: selectedStat.periodSentiment.positive, n: selectedStat.periodSentiment.positiveN, color: 'bg-emerald-400' },
-                      { label: 'Neutral',  val: selectedStat.periodSentiment.neutral,  n: selectedStat.periodSentiment.neutralN,  color: 'bg-yellow-400'  },
-                      { label: 'Bad',      val: selectedStat.periodSentiment.bad,      n: selectedStat.periodSentiment.badN,      color: 'bg-red-400'     },
-                    ].map(s => (
-                      <div key={s.label} className="flex items-center gap-2 text-xs">
-                        <span className={`w-2 h-2 rounded-full ${s.color}`} aria-hidden="true" />
-                        <span className="w-14 text-stone-600">{s.label}</span>
-                        <div className="flex-1 bg-stone-100 rounded-full h-1.5">
-                          <div className={`h-full ${s.color} rounded-full`} style={{ width: `${s.val}%` }} />
-                        </div>
-                        <span className="font-medium">{fmtPct(s.val)}</span>
-                        <span className="text-stone-400">({s.n})</span>
-                      </div>
-                    ))}
-                  </div>
-                )
-              }
-            </div>
-
-            {/* Trend sparkline */}
-            <div>
-              <p className="text-xs font-semibold text-stone-500 uppercase tracking-wide mb-2">Rating Trend (6 mo)</p>
-              {selectedStat.spark.length >= 2
-                ? (
-                  <ResponsiveContainer width="100%" height={80}>
-                    <LineChart data={selectedStat.spark} margin={{ top: 4, right: 4, left: 4, bottom: 4 }}>
-                      <Line type="monotone" dataKey="avg" stroke="#bb9230" strokeWidth={2} dot={{ r: 3, fill: '#bb9230' }} connectNulls />
-                      <Tooltip
-                        content={({ active, payload }) =>
-                          active && payload?.length
-                            ? <div className="bg-white border border-stone-200 rounded text-xs px-2 py-1 shadow">{payload[0].payload.ym}: {payload[0].value}★</div>
-                            : null
-                        }
-                      />
-                    </LineChart>
-                  </ResponsiveContainer>
-                )
-                : <p className="text-xs text-stone-400">Insufficient trend data</p>
-              }
-            </div>
-          </div>
-
-          {/* Insights */}
-          <div className="mt-5 border-t border-stone-100 pt-5">
-            <p className="text-xs font-semibold text-stone-500 uppercase tracking-wide mb-1">
-              Insights — period reviews (n={locationReviews.length})
-            </p>
-            {locationReviews.length === 0
-              ? <p className="text-sm text-stone-400">No reviews in selected period for this location.</p>
-              : <InsightPanel reviews={locationReviews} />
-            }
-          </div>
-        </div>
-        </motion.div>
+      {lStats ? (
+        <div className="skeleton h-10 w-full max-w-2xl" />
+      ) : (
+        <LocationPicker stats={stats} selected={selected ?? stats?.[0]?.name} onSelect={setSelected} />
       )}
-      </AnimatePresence>
+
+      {selectedLoc && (
+        <div>
+          <div className="flex items-center gap-3 mb-4">
+            <h3 className="text-title" style={{ color: 'var(--color-text-1)' }}>
+              {selectedLoc.name}
+            </h3>
+            <Badge variant="neutral">{selectedLoc.city}</Badge>
+            {selectedLoc.lifetimeRating && (
+              <Badge variant={selectedLoc.lifetimeRating >= 4 ? 'success' : 'warning'}>
+                {selectedLoc.lifetimeRating}★ lifetime
+              </Badge>
+            )}
+          </div>
+          <LocationDashboard loc={selectedLoc} detail={detail} loading={lDetail} />
+        </div>
+      )}
     </div>
   )
 }

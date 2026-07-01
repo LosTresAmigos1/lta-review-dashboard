@@ -217,6 +217,74 @@ def export_scraper_status(conn) -> None:
     write_json("scraper-status.json", run_list)
 
 
+def export_intelligence(conn) -> None:
+    """Export AI-generated intelligence: summaries, complaint intel, predictions, drafts."""
+    cache_rows = conn.execute("SELECT cache_key, payload FROM analytics_cache").fetchall()
+    by_key = {r["cache_key"]: json.loads(r["payload"]) for r in cache_rows}
+
+    # Company AI summary
+    if "ai_company_summary" in by_key:
+        write_json("intelligence/company-summary.json", by_key["ai_company_summary"])
+
+    # Complaint + praise intelligence
+    if "complaint_intelligence" in by_key:
+        write_json("intelligence/complaint-intelligence.json", by_key["complaint_intelligence"])
+
+    # Predictive alerts
+    if "predictive_alerts" in by_key:
+        write_json("intelligence/predictive-alerts.json", by_key["predictive_alerts"])
+
+    # Per-location detail (health score, predictions, AI summary, staff, complaints)
+    for key, payload in by_key.items():
+        if key.startswith("location_detail_"):
+            slug = key[len("location_detail_"):]
+            write_json(f"intelligence/locations/{slug}.json", payload)
+
+    # Response drafts — group into one file keyed by review_id for easy lookup
+    drafts = {}
+    for key, payload in by_key.items():
+        if key.startswith("draft_") and isinstance(payload, dict) and payload.get("review_id"):
+            rid = payload["review_id"]
+            if rid not in drafts:
+                drafts[rid] = payload
+    write_json("intelligence/response-drafts.json", drafts)
+
+
+def export_location_detail_reviews(conn, locations: dict) -> None:
+    """
+    Export enriched per-location review lists including complaint tags so
+    the Review Center can display category labels without re-computing them.
+    Already handled by export_reviews_by_location; this augments with tags.
+    """
+    try:
+        from refresh_analytics import classify_review, slugify
+    except ImportError:
+        return
+
+    for loc_id, loc in locations.items():
+        rows = conn.execute(
+            "SELECT * FROM reviews WHERE location_id = ? AND is_deleted = 0 ORDER BY review_date DESC",
+            (loc_id,),
+        ).fetchall()
+        reviews_out = []
+        for r in rows:
+            rd = dict(r)
+            tags = classify_review(rd.get("review_text") or "", rd.get("star_rating"))
+            reviews_out.append({
+                "location_name": loc["name"], "city": loc["city"],
+                "reviewer_name": rd.get("reviewer_name"), "review_date": rd.get("review_date"),
+                "star_rating": rd.get("star_rating"), "review_text": rd.get("review_text"),
+                "owner_response": rd.get("owner_response"),
+                "review_url": rd.get("review_url"),
+                "response_status": "responded" if (rd.get("owner_response") or "").strip() else "unanswered",
+                "review_id": db.canonical_review_id(rd.get("review_url") or "") or "",
+                "last_checked_at": rd.get("last_seen_at") or "",
+                "complaint_tags": tags["complaints"],
+                "praise_tags": tags["praises"],
+            })
+        write_json(f"reviews/by-location/{slugify(loc['name'])}.json", reviews_out)
+
+
 def main():
     conn = db.get_connection()
     db.init_schema(conn)
@@ -224,11 +292,12 @@ def main():
 
     export_meta(conn, locations)
     export_analytics_cache(conn)
-    export_reviews_by_location(conn, locations)
+    export_location_detail_reviews(conn, locations)  # replaces export_reviews_by_location
     export_action_items(conn, locations)
     export_validation(conn)
     export_scraper_status(conn)
     export_weekly_report(conn, locations)
+    export_intelligence(conn)
 
     conn.close()
     files = list(PUBLIC_DATA_DIR.rglob("*.json"))
