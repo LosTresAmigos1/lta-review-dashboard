@@ -1,6 +1,8 @@
 import { useMemo } from 'react'
 import { useWeeklyReport } from '../hooks/useWeeklyReport.js'
+import { useReviewsData } from '../hooks/useReviewsData.js'
 import { getBrand, getBrandColor, fmtRating } from '../utils/dataUtils.js'
+import { buildCategorySummary, COMPLAINT_CATEGORIES, PRAISE_CATEGORIES } from '../utils/textAnalysis.js'
 import Card from '../components/ui/Card.jsx'
 import Skeleton from '../components/ui/Skeleton.jsx'
 
@@ -28,6 +30,71 @@ function TrendBadge({ cur, prev }) {
   if (delta >= 0.1) return <span className="text-xs font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full">▲ +{delta.toFixed(2)}</span>
   if (delta <= -0.1) return <span className="text-xs font-semibold text-red-700 bg-red-50 px-2 py-0.5 rounded-full">▼ {delta.toFixed(2)}</span>
   return <span className="text-xs text-stone-500 bg-stone-100 px-2 py-0.5 rounded-full">— Stable</span>
+}
+
+function WeeklyComplaintSummary() {
+  const { data: allReviews } = useReviewsData()
+  const d7 = useMemo(() => new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10), [])
+  const d14 = useMemo(() => new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 10), [])
+
+  const negThisWeek = useMemo(() =>
+    (allReviews || []).filter(r => Number(r.star_rating) <= 2 && r.review_date >= d7),
+    [allReviews, d7]
+  )
+  const negLastWeek = useMemo(() =>
+    (allReviews || []).filter(r => Number(r.star_rating) <= 2 && r.review_date >= d14 && r.review_date < d7),
+    [allReviews, d7, d14]
+  )
+  const posThisWeek = useMemo(() =>
+    (allReviews || []).filter(r => Number(r.star_rating) >= 4 && r.review_date >= d7),
+    [allReviews, d7]
+  )
+
+  const complaints = useMemo(() => buildCategorySummary(negThisWeek, COMPLAINT_CATEGORIES, negLastWeek, 1), [negThisWeek, negLastWeek])
+  const praise     = useMemo(() => buildCategorySummary(posThisWeek, PRAISE_CATEGORIES, [], 1), [posThisWeek])
+
+  if (!allReviews) return null
+  if (complaints.length === 0 && praise.length === 0) {
+    return (
+      <Card className="p-5">
+        <h3 className="text-sm font-semibold text-stone-700 mb-1">This Week's Customer Themes</h3>
+        <p className="text-xs text-stone-400">No reviews with text found for this week.</p>
+      </Card>
+    )
+  }
+
+  return (
+    <div className="grid sm:grid-cols-2 gap-4">
+      {complaints.length > 0 && (
+        <Card className="border-red-200 p-5">
+          <h3 className="text-sm font-semibold text-red-800 mb-1">🔴 Issues This Week</h3>
+          <p className="text-xs text-stone-400 mb-3">Themes from {negThisWeek.length} negative reviews — grouped by meaning, not keywords.</p>
+          <div className="space-y-1.5">
+            {complaints.slice(0, 6).map(c => (
+              <div key={c.id} className="flex items-center justify-between text-xs">
+                <span className="text-stone-700 font-medium">{c.icon} {c.label}</span>
+                <span className="font-bold text-red-700 bg-red-50 px-2 py-0.5 rounded-full">{c.count}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+      {praise.length > 0 && (
+        <Card className="border-emerald-200 p-5">
+          <h3 className="text-sm font-semibold text-emerald-800 mb-1">⭐ Strengths This Week</h3>
+          <p className="text-xs text-stone-400 mb-3">Themes from {posThisWeek.length} positive reviews.</p>
+          <div className="space-y-1.5">
+            {praise.slice(0, 6).map(c => (
+              <div key={c.id} className="flex items-center justify-between text-xs">
+                <span className="text-stone-700 font-medium">{c.icon} {c.label}</span>
+                <span className="font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full">{c.count}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+    </div>
+  )
 }
 
 export default function Reports() {
@@ -149,19 +216,7 @@ export default function Reports() {
         </div>
       </Card>
 
-      {data.complaints.length > 0 && (
-        <Card className="border-red-200 p-5">
-          <h3 className="text-sm font-semibold text-stone-700 mb-1">Complaint Keywords This Week</h3>
-          <p className="text-xs text-stone-400 mb-3">Most common words in this week's 1–2 star reviews.</p>
-          <div className="flex flex-wrap gap-2">
-            {data.complaints.map(([word, count]) => (
-              <span key={word} className="text-xs font-medium text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-3 py-1.5">
-                {word} <span className="opacity-50">×{count}</span>
-              </span>
-            ))}
-          </div>
-        </Card>
-      )}
+      <WeeklyComplaintSummary />
     </div>
   )
 }
