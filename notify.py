@@ -63,12 +63,78 @@ def check_scraper_failure(conn) -> str:
         return ""
     if already_notified(conn, "scraper_failure", since=run["started_at"]):
         return ""
-    subject_marker = f"run #{run['id']}"
-    log_notification(conn, "scraper_failure", subject_marker)
+    log_notification(conn, "scraper_failure", f"run #{run['id']}")
+
+    ok = run["locations_succeeded"] or 0
+    failed = run["locations_failed"] or 0
+    total = run["locations_attempted"] or 0
+    raw = (run["error_summary"] or "").strip()
+
+    # Categorise errors into human-readable buckets
+    tab_errors, timeout_errors, other_errors = [], [], []
+    for part in raw.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        loc = part.split(":", 1)[0].strip()
+        detail = part.split(":", 1)[1].strip() if ":" in part else part
+        if "reviews tab not found" in detail.lower() or "no reviews tab" in detail.lower():
+            tab_errors.append(loc)
+        elif "timeout" in detail.lower() or "timed out" in detail.lower():
+            timeout_errors.append(loc)
+        else:
+            other_errors.append(part)
+
+    # Build a plain-English explanation
+    if tab_errors and not timeout_errors and not other_errors:
+        cause = (
+            f"The scraper could not find the <strong>Reviews section</strong> for "
+            f"{len(tab_errors)} location(s). This usually happens when Google Maps "
+            f"updates its page layout or a location loads slowly. "
+            f"The other {ok} location(s) scraped successfully."
+        )
+        fix = (
+            "This often resolves on the next automatic run. If the same locations "
+            "keep failing for several days in a row, the scraper selectors may need updating."
+        )
+        affected = tab_errors
+    elif timeout_errors:
+        cause = (
+            f"{len(timeout_errors)} location(s) timed out — the page took too long to load. "
+            f"This can happen when GitHub Actions or Google Maps responds slowly. "
+            f"{ok} of {total} locations completed successfully."
+        )
+        fix = "No action needed — the next scheduled run will retry these locations automatically."
+        affected = timeout_errors + tab_errors + other_errors
+    else:
+        cause = f"{failed} of {total} locations encountered an error during this scrape run. {ok} succeeded."
+        fix = raw or "Check the GitHub Actions logs for the full error detail."
+        affected = other_errors + tab_errors + timeout_errors
+
+    affected_html = "".join(f"<li style='margin:4px 0'>{loc}</li>" for loc in affected[:20])
+    if len(affected) > 20:
+        affected_html += f"<li style='color:#94a3b8'>…and {len(affected)-20} more</li>"
+
+    status_label = "Partial scrape — some locations failed" if run["status"] == "partial" else "Scraper run failed"
+
     return (
-        f"<h2 style='color:#b91c1c'>Scraper run #{run['id']} — {run['status']}</h2>"
-        f"<p>{run['locations_succeeded']}/{run['locations_attempted']} locations succeeded.</p>"
-        f"<p style='color:#7f1d1d'>{run['error_summary'] or 'No error detail captured.'}</p>"
+        '<div style="background:#fff7ed;border-left:4px solid #f97316;'
+        'padding:20px 24px;margin-bottom:24px;border-radius:0 10px 10px 0">'
+        f'<p style="margin:0 0 4px;font-size:11px;font-weight:700;color:#c2410c;'
+        f'text-transform:uppercase;letter-spacing:0.08em">Scraper Alert</p>'
+        f'<h2 style="margin:0 0 12px;font-size:16px;font-weight:700;color:#7c2d12">'
+        f'⚠️ {status_label}</h2>'
+        f'<p style="margin:0 0 8px;font-size:13px;color:#1e293b;line-height:1.6">{cause}</p>'
+        f'<p style="margin:0 0 12px;font-size:13px;color:#475569;line-height:1.6">'
+        f'<strong>What to do:</strong> {fix}</p>'
+        + (
+            f'<p style="margin:0 0 6px;font-size:12px;font-weight:600;color:#7c2d12">'
+            f'Affected locations:</p>'
+            f'<ul style="margin:0;padding-left:20px;font-size:13px;color:#374151">'
+            f'{affected_html}</ul>'
+            if affected else ''
+        )
+        + '</div>'
     )
 
 

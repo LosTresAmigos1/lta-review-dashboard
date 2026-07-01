@@ -4,11 +4,39 @@
 
 @layer base {
   *, *::before, *::after { box-sizing: border-box; }
+
   body {
     @apply bg-stone-50 text-stone-800 font-sans antialiased;
+    background-image: radial-gradient(ellipse at 60% 0%, rgba(212,175,55,0.04) 0%, transparent 60%),
+                      radial-gradient(ellipse at 0% 100%, rgba(46,33,24,0.03) 0%, transparent 50%);
+    background-attachment: fixed;
   }
+
   :focus-visible {
     @apply outline-2 outline-offset-2 outline-amber-500;
+  }
+
+  /* Premium scrollbar */
+  ::-webkit-scrollbar        { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track  { background: transparent; }
+  ::-webkit-scrollbar-thumb  { background: #cbb293; border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #a8835d; }
+
+  /* Text selection */
+  ::selection { background: rgba(212,175,55,0.2); color: inherit; }
+}
+
+@layer components {
+  /* Glass card — use className="glass-card" on any element */
+  .glass-card {
+    @apply bg-white/80 backdrop-blur-sm border border-white/60;
+    box-shadow: 0 1px 3px rgba(46,33,24,0.06), 0 1px 2px rgba(46,33,24,0.04);
+  }
+
+  /* Stat number */
+  .stat-value {
+    @apply text-3xl font-bold tracking-tight text-stone-800;
+    font-variant-numeric: tabular-nums;
   }
 }
 
@@ -19,8 +47,18 @@
       45deg,
       transparent,
       transparent 4px,
-      rgba(0,0,0,.08) 4px,
-      rgba(0,0,0,.08) 8px
+      rgba(0,0,0,.07) 4px,
+      rgba(0,0,0,.07) 8px
     );
+  }
+
+  /* Gold shimmer on hover for interactive cards */
+  .hover-gold-ring:hover {
+    box-shadow: 0 0 0 1.5px rgba(212,175,55,0.35), 0 4px 16px rgba(46,33,24,0.08);
+  }
+
+  /* Subtle inner glow for stat cards */
+  .stat-glow {
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.6), 0 1px 3px rgba(46,33,24,0.06);
   }
 }

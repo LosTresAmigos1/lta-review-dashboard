@@ -32,7 +32,7 @@ function Sparkline({ data }) {
   return (
     <ResponsiveContainer width={80} height={32}>
       <LineChart data={data} margin={{ top: 2, right: 2, left: 2, bottom: 2 }}>
-        <Line type="monotone" dataKey="avg" stroke="#d97706" strokeWidth={1.5} dot={false} connectNulls />
+        <Line type="monotone" dataKey="avg" stroke="#bb9230" strokeWidth={1.5} dot={false} connectNulls />
         <Tooltip
           content={({ active, payload }) =>
             active && payload?.length
@@ -266,7 +266,7 @@ export default function LocationDetail({ allReviews, filtered, filters }) {
                 ? (
                   <ResponsiveContainer width="100%" height={80}>
                     <LineChart data={selectedStat.spark} margin={{ top: 4, right: 4, left: 4, bottom: 4 }}>
-                      <Line type="monotone" dataKey="avg" stroke="#d97706" strokeWidth={2} dot={{ r: 3, fill: '#bb9230' }} connectNulls />
+                      <Line type="monotone" dataKey="avg" stroke="#bb9230" strokeWidth={2} dot={{ r: 3, fill: '#bb9230' }} connectNulls />
                       <Tooltip
                         content={({ active, payload }) =>
                           active && payload?.length

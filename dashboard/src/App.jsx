@@ -77,19 +77,37 @@ function RootLayout() {
 
   if (isLoading || !filters) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-stone-50">
-        <div className="w-64 space-y-3">
-          <Skeleton className="h-4 w-40 mx-auto" />
-          <Skeleton className="h-3 w-56 mx-auto" />
+      <div className="min-h-screen flex flex-col items-center justify-center bg-stone-50 gap-5">
+        <div className="text-center space-y-1 mb-2">
+          <p className="text-[10px] font-bold tracking-[0.22em] text-amber-500 uppercase">Future Marketing Studio</p>
+          <p className="text-stone-700 font-semibold text-lg">Review Intelligence</p>
         </div>
+        <div className="flex items-center gap-2">
+          <div className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-bounce [animation-delay:-0.3s]" />
+          <div className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-bounce [animation-delay:-0.15s]" />
+          <div className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-bounce" />
+        </div>
+        <p className="text-xs text-stone-400">Loading your review data…</p>
       </div>
     )
   }
 
   if (isError) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-stone-50">
-        <p className="text-red-600 text-sm">Failed to load review data.</p>
+      <div className="min-h-screen flex flex-col items-center justify-center bg-stone-50 gap-4">
+        <div className="w-12 h-12 rounded-full bg-red-50 border border-red-200 flex items-center justify-center text-red-500 text-xl">
+          ⚠
+        </div>
+        <div className="text-center">
+          <p className="text-stone-800 font-semibold text-sm">Failed to load review data</p>
+          <p className="text-stone-400 text-xs mt-1">Please refresh the page. If the problem persists, check the Scraper Status page.</p>
+        </div>
+        <button
+          onClick={() => window.location.reload()}
+          className="text-xs text-amber-600 hover:text-amber-800 font-medium border border-amber-200 rounded-lg px-4 py-2 hover:bg-amber-50 transition-colors"
+        >
+          Retry
+        </button>
       </div>
     )
   }
@@ -100,14 +118,15 @@ function RootLayout() {
     <Layout dataWindow={dataWindow} allReviews={allReviews} unansweredCount={unansweredCount}>
       {showFilterBar && (
         <>
-          <div className="mb-6">
+          <div className="mb-5">
             <GlobalFilters allReviews={allReviews} filters={filters} onChange={setFilters} />
           </div>
-          <div className="mb-4 flex items-center gap-2">
-            <span className="text-xs text-stone-400">Period:</span>
-            <span className="text-xs font-medium text-stone-600 bg-stone-100 px-2 py-0.5 rounded-full">{periodLabel}</span>
-            <span className="text-xs text-stone-400">·</span>
-            <span className="text-xs text-stone-500">{filtered.length.toLocaleString()} reviews</span>
+          <div className="mb-5 flex items-center gap-2.5">
+            <span className="inline-flex items-center gap-1.5 text-xs text-stone-500 bg-stone-100 border border-stone-200 rounded-full px-3 py-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 flex-shrink-0" />
+              {periodLabel}
+            </span>
+            <span className="text-xs text-stone-400 font-medium">{filtered.length.toLocaleString()} reviews</span>
           </div>
         </>
       )}

@@ -256,26 +256,62 @@ async def scroll_and_extract(page, max_reviews: int) -> list:
 
 
 async def go_to_reviews_tab(page):
-    for sel in ['button[aria-label^="Reviews"]', 'button[aria-label*=" reviews"]',
-                '[role="tab"]:has-text("Reviews")']:
+    """Click the Reviews tab. Returns True on success, False if not found."""
+
+    # Strategy 1: direct aria-label selectors (most reliable across Maps layouts)
+    for sel in [
+        'button[aria-label^="Reviews"]',
+        'button[aria-label*=" reviews"]',
+        'button[aria-label*="Reviews,"]',
+        '[role="tab"][aria-label*="Review"]',
+        '[role="tab"]:has-text("Reviews")',
+        'button:has-text("Reviews")',
+        '.hh2c6:has-text("Reviews")',
+    ]:
         try:
             btn = page.locator(sel).first
-            if await btn.is_visible(timeout=3000):
+            if await btn.is_visible(timeout=2500):
                 await btn.click()
-                await page.wait_for_timeout(1500)
-                return True
+                await page.wait_for_timeout(2500)
+                # Verify review content appeared
+                if await page.query_selector('[data-review-id]') or \
+                   await page.query_selector('div[role="feed"]'):
+                    return True
+                return True  # tab clicked even if no reviews yet
         except Exception:
             pass
-    tabs = await page.query_selector_all('[role="tab"], button[data-tab-index]')
-    for tab in tabs:
+
+    # Strategy 2: iterate all tab/button elements looking for "review" text
+    for tab_sel in ['[role="tab"]', 'button[data-tab-index]', '.hh2c6', '.RWPxGd button']:
         try:
-            txt = (await tab.inner_text()).lower()
-            if "review" in txt:
-                await tab.click()
-                await page.wait_for_timeout(1500)
-                return True
+            tabs = await page.query_selector_all(tab_sel)
+            for tab in tabs:
+                try:
+                    txt = (await tab.inner_text()).lower().strip()
+                    if "review" in txt:
+                        await tab.click()
+                        await page.wait_for_timeout(2500)
+                        return True
+                except Exception:
+                    pass
         except Exception:
             pass
+
+    # Strategy 3: look for a "Reviews" link in the place panel
+    for link_sel in [
+        'a[href*="#lrd"]', 'a[aria-label*="Review"]',
+        'a[data-item-id*="review"]',
+    ]:
+        try:
+            link = page.locator(link_sel).first
+            if await link.is_visible(timeout=1000):
+                await link.click()
+                await page.wait_for_timeout(2500)
+                if await page.query_selector('[data-review-id]'):
+                    return True
+        except Exception:
+            pass
+
     return False
 
 
@@ -315,7 +351,7 @@ async def scroll_reviews(page, max_reviews=200):
 
     prev = 0
     stall = 0
-    for i in range(300):
+    for _ in range(300):
         if feed:
             await feed.evaluate("el => el.scrollTop = el.scrollHeight")
         else:
@@ -350,21 +386,40 @@ async def scrape_location(context, loc) -> tuple:
         await page.wait_for_timeout(3000)
         await dismiss_dialogs(page)
 
-        for sel in ['.Nv2PK', '.hfpxzc', 'a[href*="/maps/place/"]']:
+        # Click the first place result (multiple selector fallbacks for Maps layout changes)
+        for sel in ['.Nv2PK', '.hfpxzc', 'a[href*="/maps/place/"]', '.Io6YTe', '[data-value="Search Results"] .Nv2PK']:
             try:
                 first = page.locator(sel).first
                 if await first.is_visible(timeout=2000):
                     await first.click()
-                    await page.wait_for_timeout(2500)
+                    await page.wait_for_timeout(3500)  # extra time for panel to fully load
                     break
             except Exception:
                 pass
 
+        # Give the business panel extra time to render tabs
+        await page.wait_for_timeout(1500)
+
         if not await go_to_reviews_tab(page):
-            await page.wait_for_timeout(2000)
+            # One more wait + retry before giving up
+            await page.wait_for_timeout(3000)
             if not await go_to_reviews_tab(page):
-                print(f"    [SKIP] no Reviews tab found")
-                return [], "no Reviews tab found"
+                # Collect diagnostic info for a useful error message
+                try:
+                    visible_tabs = []
+                    for el in await page.query_selector_all('[role="tab"], button[data-tab-index]'):
+                        try:
+                            txt = (await el.inner_text()).strip()
+                            if txt:
+                                visible_tabs.append(txt)
+                        except Exception:
+                            pass
+                    tabs_found = ", ".join(visible_tabs[:6]) or "none"
+                except Exception:
+                    tabs_found = "unknown"
+                msg = f"Reviews tab not found (tabs visible: {tabs_found})"
+                print(f"    [SKIP] {msg}")
+                return [], msg
 
         await sort_by_newest(page)
         reviews = await scroll_and_extract(page, MAX_SCROLL)
