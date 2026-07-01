@@ -393,6 +393,14 @@ async def go_to_reviews_tab(page, name: str) -> tuple[bool, str]:
     """
     Click the Reviews tab on a place panel.
     Returns (success, detail_message).
+
+    Strategy order:
+      1. aria-label CSS selectors (fastest when selector matches)
+      2. Text/aria content scan across all tab/button containers
+      3. Anchor links (#lrd= deep-links)
+      4. JS brute-force: scan EVERY interactive element for "review" text
+         — catches renamed/restructured tabs regardless of HTML shape
+      5. If review feed is already visible without clicking, return success
     """
     current_url = page.url or ""
     try:
@@ -401,35 +409,39 @@ async def go_to_reviews_tab(page, name: str) -> tuple[bool, str]:
         title = "?"
     print(f"    [tab] {name} | URL: {current_url[:65]} | Title: {title[:45]}")
 
-    # ── Strategy 1: aria-label selectors ──────────────────────────────────
+    # Give the place panel extra time to finish rendering tabs
+    await page.wait_for_timeout(2000)
+
+    # ── Strategy 1: aria-label CSS selectors ─────────────────────────────
     for sel in [
         'button[aria-label^="Reviews"]',
         'button[aria-label*=" reviews"]',
         'button[aria-label*="Reviews,"]',
         'button[aria-label*="reviews,"]',
-        '[role="tab"][aria-label*="eview"]',   # "Review" or "Reviews" (any lang capitalisation)
-        'button[data-tab-index="1"]',          # Reviews is almost always tab index 1 (0-based)
+        '[role="tab"][aria-label*="eview"]',
+        'button[data-tab-index="1"]',
         'button[data-tab-index="2"]',
         '.hh2c6[data-tab-index="1"]',
+        # Playwright get_by_role approach
+        'button[aria-label*="Reviews "]',
+        '[aria-label*="reviews "]',
     ]:
         try:
             btn = page.locator(sel).first
-            if await btn.is_visible(timeout=2000):
+            if await btn.is_visible(timeout=1500):
                 print(f"    [tab] Clicking: {sel}")
                 await btn.click()
                 await page.wait_for_timeout(2500)
-                # Verify review content loaded
                 if await page.query_selector('[data-review-id]') or \
                    await page.query_selector('div[role="feed"]'):
                     print(f"    [tab] ✓ Reviews content confirmed")
                     return True, ""
-                # Tab clicked but content not yet visible — still a win
                 print(f"    [tab] ✓ Tab clicked (content pending)")
-                return True, "tab clicked; review content not yet confirmed"
+                return True, "tab clicked; content pending"
         except Exception:
             pass
 
-    # ── Strategy 2: text-based search across all tab/button elements ──────
+    # ── Strategy 2: text/aria scan across tab/button containers ──────────
     for container in [
         '[role="tab"]',
         'button[data-tab-index]',
@@ -439,6 +451,7 @@ async def go_to_reviews_tab(page, name: str) -> tuple[bool, str]:
         'button[class*="Gpq6kf"]',
         'button[class*="Tab"]',
         '[role="tablist"] button',
+        '[role="tablist"] [role="tab"]',
     ]:
         try:
             tabs = await page.query_selector_all(container)
@@ -447,8 +460,8 @@ async def go_to_reviews_tab(page, name: str) -> tuple[bool, str]:
                     txt  = (await tab.inner_text()).lower().strip()
                     aria = ((await tab.get_attribute("aria-label")) or "").lower()
                     combined = txt + " " + aria
-                    if "review" in combined or any(label in combined for label in REVIEW_TAB_LABELS):
-                        print(f"    [tab] Clicking by text match: '{(txt or aria)[:40]}'")
+                    if "review" in combined or any(lbl in combined for lbl in REVIEW_TAB_LABELS):
+                        print(f"    [tab] Clicking by text: '{(txt or aria)[:40]}'")
                         await tab.click()
                         await page.wait_for_timeout(2500)
                         return True, f"text match: '{(txt or aria)[:40]}'"
@@ -457,7 +470,7 @@ async def go_to_reviews_tab(page, name: str) -> tuple[bool, str]:
         except Exception:
             pass
 
-    # ── Strategy 3: anchor links (e.g. #lrd= deep-link) ──────────────────
+    # ── Strategy 3: anchor links ──────────────────────────────────────────
     for link_sel in ['a[href*="#lrd"]', 'a[aria-label*="eview"]', 'a[data-item-id*="review"]']:
         try:
             link = page.locator(link_sel).first
@@ -470,29 +483,79 @@ async def go_to_reviews_tab(page, name: str) -> tuple[bool, str]:
         except Exception:
             pass
 
+    # ── Strategy 4: JS brute-force scan ──────────────────────────────────
+    # Scan EVERY interactive element on the page for "review" text.
+    # Catches renamed tabs, divs acting as tabs, shadow-DOM-lite patterns,
+    # and any structural change that breaks CSS selectors.
+    print(f"    [tab] Attempting JS brute-force scan...")
+    try:
+        clicked_label = await page.evaluate("""() => {
+            const SKIP = new Set(['write a review', 'add a review', 'leave a review',
+                                  'write review', 'add review']);
+            const els = Array.from(document.querySelectorAll(
+                'button, [role="tab"], [role="button"], a, div[tabindex], span[tabindex]'
+            ));
+            for (const el of els) {
+                const text = (
+                    (el.innerText || el.textContent || '') + ' ' +
+                    (el.getAttribute('aria-label') || '')
+                ).toLowerCase().trim();
+                if (!text.includes('review')) continue;
+                if (SKIP.has(text)) continue;
+                // Make sure it's actually visible
+                const r = el.getBoundingClientRect();
+                if (r.width === 0 || r.height === 0) continue;
+                el.click();
+                return text.slice(0, 60);
+            }
+            return null;
+        }""")
+        if clicked_label:
+            print(f"    [tab] JS scan clicked: '{clicked_label}'")
+            await page.wait_for_timeout(3000)
+            if await page.query_selector('[data-review-id]') or \
+               await page.query_selector('div[role="feed"]'):
+                print(f"    [tab] ✓ Reviews content confirmed via JS scan")
+                return True, f"JS scan: '{clicked_label}'"
+            # Clicked something but feed not visible yet — still count as success
+            return True, f"JS scan click: '{clicked_label}' (feed pending)"
+    except Exception as e:
+        print(f"    [tab] JS scan error: {e}")
+
+    # ── Strategy 5: check if review content is already visible ───────────
+    # Sometimes the Overview page already shows the reviews section inline.
+    try:
+        if await page.query_selector('[data-review-id]'):
+            count = len(await page.query_selector_all('[data-review-id]'))
+            print(f"    [tab] ✓ Reviews already visible in DOM ({count} elements)")
+            return True, "reviews already in DOM"
+    except Exception:
+        pass
+
     # ── Failure: collect diagnostics ──────────────────────────────────────
-    visible_tabs: list[str] = []
+    # Log every button/tab label and a snippet of the DOM to help diagnosis
+    visible_labels: list[str] = []
     try:
         candidates = await page.query_selector_all(
-            '[role="tab"], button[data-tab-index], .hh2c6, button[aria-label]'
+            '[role="tab"], button[data-tab-index], .hh2c6, button[aria-label], button'
         )
-        for el in candidates:
+        for el in candidates[:30]:
             try:
                 txt  = (await el.inner_text()).strip()
                 aria = (await el.get_attribute("aria-label") or "").strip()
-                label = txt or aria
-                if label and label not in visible_tabs:
-                    visible_tabs.append(label[:45])
+                label = (txt or aria)[:50]
+                if label and label not in visible_labels:
+                    visible_labels.append(label)
             except Exception:
                 pass
     except Exception:
         pass
 
-    tabs_str = ", ".join(visible_tabs[:8]) if visible_tabs else "none"
+    labels_str = ", ".join(visible_labels[:10]) if visible_labels else "none"
     detail = (
-        f"Reviews tab not found | "
-        f"URL: {current_url[:65]} | "
-        f"Tabs visible: [{tabs_str}]"
+        f"Reviews tab not found after 5 strategies | "
+        f"URL: {current_url[:60]} | "
+        f"Elements found: [{labels_str}]"
     )
     print(f"    [tab] ✗ {detail}")
     return False, detail
@@ -907,10 +970,32 @@ async def main():
 
     all_scraped = []
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=not LOCAL_MODE)
+        browser = await p.chromium.launch(
+            headless=not LOCAL_MODE,
+            args=[
+                # Reduce signals that identify the browser as headless/automated.
+                # Google Maps renders a stripped page for detected bots, which
+                # removes the Reviews tab from the DOM entirely.
+                "--disable-blink-features=AutomationControlled",
+                "--disable-infobars",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-popup-blocking",
+            ],
+        )
         context = await browser.new_context(
             viewport={"width": 1280, "height": 900},
             locale="en-US",
+            # Real Chrome 137 UA — prevents Google from serving the stripped Maps UI
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/137.0.0.0 Safari/537.36"
+            ),
+        )
+        # Remove the navigator.webdriver flag that headless Chrome exposes
+        await context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', { get: () => undefined })"
         )
         for loc in LOCATIONS:
             run_stats["attempted"] += 1
