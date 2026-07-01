@@ -1,6 +1,6 @@
 """
 Headless scraper for all 21 LTA restaurants.
-Run by GitHub Actions every 4 hours.
+Run by GitHub Actions every 6 hours.
 Writes new reviews to dashboard/reviews.db (source of truth) and
 dashboard/reviews.csv (secondary export), and outputs GitHub Actions variables.
 """
@@ -15,13 +15,24 @@ from collections import defaultdict
 
 import db
 
-BASE_DIR = Path(__file__).parent
-REVIEWS_CSV = BASE_DIR / "dashboard" / "reviews.csv"
+BASE_DIR      = Path(__file__).parent
+REVIEWS_CSV   = BASE_DIR / "dashboard" / "reviews.csv"
+LOGS_DIR      = BASE_DIR / "logs"
 GITHUB_OUTPUT = os.environ.get("GITHUB_OUTPUT", "")
 
-LOCAL_MODE = "--local" in sys.argv  # headed browser, more reviews, git push + vercel deploy
-MAX_SCROLL = 3000 if LOCAL_MODE else 300   # max reviews to load per location (3000 covers all locations)
-EXTRACT_EVERY = 50                         # extract from DOM every N new reviews to avoid Chrome GC crash
+# --local: headed browser, full 3000-review scroll, git push + Vercel deploy
+# --debug: save screenshots + HTML snapshots on failure (auto-enabled in cloud CI)
+LOCAL_MODE = "--local" in sys.argv
+DEBUG_MODE = "--debug" in sys.argv or bool(GITHUB_OUTPUT)  # always on in CI
+MAX_SCROLL    = 3000 if LOCAL_MODE else 300
+EXTRACT_EVERY = 50
+
+# "Reviews" button label in every language Google Maps might show
+REVIEW_TAB_LABELS = {
+    "reviews", "reseñas", "avis", "recensioni", "bewertungen",
+    "avaliações", "отзывы", "評論", "리뷰", "レビュー", "ulasan",
+    "rezensionen", "valoraciones", "değerlendirmeler",
+}
 
 LOCATIONS = [
     {"name": "Los Tres Amigos Livonia",         "city": "Livonia",         "search": "Los Tres Amigos 29441 Five Mile Rd Livonia MI"},
@@ -50,12 +61,6 @@ LOCATIONS = [
 FIELDNAMES = ["location_name", "city", "reviewer_name", "review_date",
               "star_rating", "review_text", "owner_response", "review_url"]
 
-# The same underlying Google review shows up under different review_url formats
-# depending on which pipeline scraped it: Takeout/API exports use
-# "?placeid=<id>", this Playwright scraper uses "/reviews/<id>". Comparing the
-# raw URL string causes the same review to be treated as two different rows
-# (a confirmed source of duplicate rows in dashboard/reviews.csv). Extracting
-# just the ID lets every pipeline dedupe against every other pipeline.
 _PLACEID_RE = re.compile(r'placeid=([^&]+)')
 _MAPS_ID_RE = re.compile(r'/reviews/([^/?]+)')
 
@@ -111,14 +116,410 @@ def relative_to_date(text: str) -> str:
     return now.strftime("%Y-%m-%d")
 
 
-async def dismiss_dialogs(page):
-    for sel in ['button[aria-label="Accept all"]', 'button[aria-label="Reject all"]',
-                'form[action*="consent"] button']:
+# ---------------------------------------------------------------------------
+# Diagnostic helpers
+# ---------------------------------------------------------------------------
+
+async def save_debug_snapshot(page, name: str, step: str) -> str | None:
+    """Save a screenshot + HTML dump to logs/ for post-mortem. Returns screenshot path or None."""
+    if not DEBUG_MODE:
+        return None
+    try:
+        LOGS_DIR.mkdir(exist_ok=True)
+        safe = re.sub(r"[^a-z0-9]+", "-", name.lower())[:35]
+        ts   = datetime.now().strftime("%H%M%S")
+        shot = LOGS_DIR / f"{safe}-{step}-{ts}.png"
+        html = LOGS_DIR / f"{safe}-{step}-{ts}.html"
+        await page.screenshot(path=str(shot), full_page=False)
+        html.write_text((await page.content())[:400_000], encoding="utf-8")
+        print(f"      [DEBUG] screenshot → logs/{shot.name}")
+        print(f"      [DEBUG] html dump  → logs/{html.name}")
+        return str(shot)
+    except Exception as e:
+        print(f"      [DEBUG] snapshot failed: {e}")
+        return None
+
+
+async def detect_page_state(page) -> tuple[str, str]:
+    """
+    Classify the current page. Returns (state, human_detail).
+
+    States:
+      'place'   – Google Maps place panel (correct landing)
+      'search'  – Maps search results list (need to click a result)
+      'consent' – Google consent / cookie gate
+      'signin'  – Google sign-in page
+      'sorry'   – Google rate-limit / "unusual traffic" block
+      'captcha' – CAPTCHA / robot check
+      'unknown' – couldn't determine
+    """
+    url   = page.url or ""
+    title = ""
+    try:
+        title = await page.title()
+    except Exception:
+        pass
+
+    # URL is the most reliable signal
+    if "/maps/place/"   in url:
+        return "place",   f"Maps place panel — {url[:80]}"
+    if "/maps/search/"  in url:
+        return "search",  f"Maps search results — {url[:80]}"
+    if "consent.google" in url:
+        return "consent", f"Google consent gate — {url[:80]}"
+    if "accounts.google" in url:
+        return "signin",  f"Google sign-in — {url[:80]}"
+    if "/sorry/"        in url or "google.com/sorry" in url:
+        return "sorry",   f"Google rate-limit page — {url[:80]}"
+
+    # Content-based fallback
+    try:
+        body = (await page.content()).lower()
+        if "captcha" in body or "recaptcha" in body:
+            return "captcha", f"CAPTCHA detected — {url[:80]}"
+        if "unusual traffic" in body or "automated requests" in body:
+            return "sorry",   f"Automation blocked — {url[:80]}"
+        if "/maps/place/" in body and "data-review-id" in body:
+            return "place",   f"Place content found in body — {url[:80]}"
+    except Exception:
+        pass
+
+    return "unknown", f"URL: {url[:80]} | Title: {title[:60]}"
+
+
+async def try_dismiss_blocking(page) -> bool:
+    """Dismiss consent dialogs, cookie banners, and in-Maps popups.
+    Returns True if a consent page was explicitly dismissed."""
+    url = page.url or ""
+    dismissed_consent = False
+
+    if "consent.google" in url:
+        for sel in [
+            'button[aria-label*="Accept"]',
+            'button[aria-label*="Reject"]',
+            '#introAgreeButton',
+            'button:has-text("Accept all")',
+            'button:has-text("Reject all")',
+            'button:has-text("I agree")',
+        ]:
+            try:
+                btn = page.locator(sel).first
+                if await btn.is_visible(timeout=2000):
+                    await btn.click()
+                    await page.wait_for_timeout(2500)
+                    dismissed_consent = True
+                    break
+            except Exception:
+                pass
+
+    # In-page overlay dialogs (cookie banner, "before you continue", etc.)
+    for sel in [
+        'button[aria-label="Accept all"]',
+        'button[aria-label="Reject all"]',
+        'button[jsname="higCR"]',
+        'button:has-text("Accept all")',
+        'button:has-text("Reject all")',
+        'form[action*="consent"] button',
+    ]:
         try:
             btn = page.locator(sel).first
-            if await btn.is_visible(timeout=1000):
+            if await btn.is_visible(timeout=800):
                 await btn.click()
-                await page.wait_for_timeout(500)
+                await page.wait_for_timeout(600)
+        except Exception:
+            pass
+
+    return dismissed_consent
+
+
+# ---------------------------------------------------------------------------
+# Navigation
+# ---------------------------------------------------------------------------
+
+async def _get_stored_maps_url(name: str) -> str:
+    """Return the maps_url stored from a previous successful run (may be empty)."""
+    try:
+        conn = db.get_connection()
+        row  = conn.execute(
+            "SELECT maps_url FROM locations WHERE name = ? AND maps_url IS NOT NULL AND maps_url != ''",
+            (name,),
+        ).fetchone()
+        conn.close()
+        return row["maps_url"] if row else ""
+    except Exception:
+        return ""
+
+
+async def navigate_to_place(page, loc: dict) -> tuple[bool, str]:
+    """
+    Land on the Google Maps place panel for a location.
+    Returns (success, failure_reason).
+
+    Strategies tried in order:
+      A  Navigate to Maps search URL → check if it auto-redirected to /maps/place/
+      B  Follow the first a[href*="/maps/place/"] link found on the search page
+      C  Click first visible result card by CSS selector, verify URL changed
+      D  Use the maps_url stored in the database from a prior successful run
+    """
+    name   = loc["name"]
+    search = loc["search"]
+    search_url = "https://www.google.com/maps/search/" + search.replace(" ", "+")
+
+    # ── A. Navigate to search URL ──────────────────────────────────────────
+    print(f"    [nav] Navigating: {search_url}")
+    try:
+        await page.goto(search_url, wait_until="domcontentloaded", timeout=35000)
+    except Exception as e:
+        return False, f"Navigation timeout/error: {e}"
+
+    await page.wait_for_timeout(3500)
+
+    # Check for blocking pages first
+    state, detail = await detect_page_state(page)
+    print(f"    [nav] Page state after load: {state} — {detail}")
+
+    if state in ("consent", "signin"):
+        print(f"    [nav] Dismissing {state} page...")
+        await try_dismiss_blocking(page)
+        await page.wait_for_timeout(2500)
+        state, detail = await detect_page_state(page)
+        print(f"    [nav] After dismiss: {state}")
+        if state in ("consent", "signin"):
+            return False, f"Blocked by {state} page — dismissal failed"
+
+    if state == "sorry":
+        return False, "Google rate-limit / automation block detected"
+    if state == "captcha":
+        return False, "CAPTCHA detected — Google identified the runner as a bot"
+
+    await try_dismiss_blocking(page)  # dismiss any in-page overlays
+
+    # Did Google auto-redirect straight to the place panel?
+    state, detail = await detect_page_state(page)
+    if state == "place":
+        print(f"    [nav] ✓ Auto-redirected to place panel")
+        return True, ""
+
+    # ── B. Follow first /maps/place/ href directly ─────────────────────────
+    print(f"    [nav] On search page — attempting href extraction")
+    try:
+        # Wait a little longer for JS to finish rendering the results list
+        await page.wait_for_timeout(2000)
+        links = await page.query_selector_all('a[href*="/maps/place/"]')
+        if links:
+            href = await links[0].get_attribute("href") or ""
+            if href:
+                if href.startswith("/"):
+                    href = "https://www.google.com" + href
+                # Strip trailing fragment/params that prevent panel from loading
+                href = href.split("?")[0]
+                print(f"    [nav] Following place href: {href[:80]}")
+                await page.goto(href, wait_until="domcontentloaded", timeout=30000)
+                await page.wait_for_timeout(3500)
+                state, detail = await detect_page_state(page)
+                if state == "place":
+                    print(f"    [nav] ✓ On place panel via href")
+                    return True, ""
+                print(f"    [nav] href nav landed on: {state} — {detail}")
+    except Exception as e:
+        print(f"    [nav] href strategy error: {e}")
+
+    # ── C. Click first result card by CSS (multiple selector fallbacks) ────
+    print(f"    [nav] Attempting result card click")
+    for sel in [
+        # Semantic / data-attribute selectors (survive CSS class renames)
+        '[data-place-id]',
+        'a[data-cid]',
+        '[jsaction*="placeCard"]',
+        # Structural selectors
+        '[role="article"] a[href*="/maps/"]',
+        'div[aria-label] > a[href*="/maps/place/"]',
+        # Class-name selectors (may change but kept as last resort)
+        '.Nv2PK', '.hfpxzc', '.Io6YTe', '.lI9IFe',
+    ]:
+        try:
+            el = page.locator(sel).first
+            if not await el.is_visible(timeout=1500):
+                continue
+            url_before = page.url
+            await el.click()
+            # Wait for URL to change (place panel loading is async)
+            try:
+                await page.wait_for_url(lambda u: "/maps/place/" in u, timeout=6000)
+            except Exception:
+                await page.wait_for_timeout(4000)
+            state, detail = await detect_page_state(page)
+            if state == "place":
+                print(f"    [nav] ✓ On place panel via card click ({sel})")
+                return True, ""
+            if page.url != url_before:
+                print(f"    [nav] Card click changed URL but not to place: {state}")
+            # Try next selector
+        except Exception:
+            pass
+
+    # ── D. Use stored maps_url from database ──────────────────────────────
+    stored_url = await _get_stored_maps_url(name)
+    if stored_url:
+        print(f"    [nav] Trying stored maps_url: {stored_url[:80]}")
+        try:
+            await page.goto(stored_url, wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_timeout(3500)
+            state, detail = await detect_page_state(page)
+            if state == "place":
+                print(f"    [nav] ✓ On place panel via stored maps_url")
+                return True, ""
+        except Exception as e:
+            print(f"    [nav] Stored URL navigation error: {e}")
+
+    # All strategies exhausted
+    final_state, final_detail = await detect_page_state(page)
+    page_title = ""
+    try:
+        page_title = await page.title()
+    except Exception:
+        pass
+    return False, (
+        f"Could not navigate to place panel after 4 strategies. "
+        f"Final state: {final_state} ({final_detail}) | URL: {page.url[:70]} | Title: {page_title[:50]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Reviews tab
+# ---------------------------------------------------------------------------
+
+async def go_to_reviews_tab(page, name: str) -> tuple[bool, str]:
+    """
+    Click the Reviews tab on a place panel.
+    Returns (success, detail_message).
+    """
+    current_url = page.url or ""
+    try:
+        title = await page.title()
+    except Exception:
+        title = "?"
+    print(f"    [tab] {name} | URL: {current_url[:65]} | Title: {title[:45]}")
+
+    # ── Strategy 1: aria-label selectors ──────────────────────────────────
+    for sel in [
+        'button[aria-label^="Reviews"]',
+        'button[aria-label*=" reviews"]',
+        'button[aria-label*="Reviews,"]',
+        'button[aria-label*="reviews,"]',
+        '[role="tab"][aria-label*="eview"]',   # "Review" or "Reviews" (any lang capitalisation)
+        'button[data-tab-index="1"]',          # Reviews is almost always tab index 1 (0-based)
+        'button[data-tab-index="2"]',
+        '.hh2c6[data-tab-index="1"]',
+    ]:
+        try:
+            btn = page.locator(sel).first
+            if await btn.is_visible(timeout=2000):
+                print(f"    [tab] Clicking: {sel}")
+                await btn.click()
+                await page.wait_for_timeout(2500)
+                # Verify review content loaded
+                if await page.query_selector('[data-review-id]') or \
+                   await page.query_selector('div[role="feed"]'):
+                    print(f"    [tab] ✓ Reviews content confirmed")
+                    return True, ""
+                # Tab clicked but content not yet visible — still a win
+                print(f"    [tab] ✓ Tab clicked (content pending)")
+                return True, "tab clicked; review content not yet confirmed"
+        except Exception:
+            pass
+
+    # ── Strategy 2: text-based search across all tab/button elements ──────
+    for container in [
+        '[role="tab"]',
+        'button[data-tab-index]',
+        '.hh2c6',
+        '.RWPxGd button',
+        'button[class*="hh2c6"]',
+        'button[class*="Gpq6kf"]',
+        'button[class*="Tab"]',
+        '[role="tablist"] button',
+    ]:
+        try:
+            tabs = await page.query_selector_all(container)
+            for tab in tabs:
+                try:
+                    txt  = (await tab.inner_text()).lower().strip()
+                    aria = ((await tab.get_attribute("aria-label")) or "").lower()
+                    combined = txt + " " + aria
+                    if "review" in combined or any(label in combined for label in REVIEW_TAB_LABELS):
+                        print(f"    [tab] Clicking by text match: '{(txt or aria)[:40]}'")
+                        await tab.click()
+                        await page.wait_for_timeout(2500)
+                        return True, f"text match: '{(txt or aria)[:40]}'"
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    # ── Strategy 3: anchor links (e.g. #lrd= deep-link) ──────────────────
+    for link_sel in ['a[href*="#lrd"]', 'a[aria-label*="eview"]', 'a[data-item-id*="review"]']:
+        try:
+            link = page.locator(link_sel).first
+            if await link.is_visible(timeout=1000):
+                print(f"    [tab] Clicking link: {link_sel}")
+                await link.click()
+                await page.wait_for_timeout(2500)
+                if await page.query_selector('[data-review-id]'):
+                    return True, f"link: {link_sel}"
+        except Exception:
+            pass
+
+    # ── Failure: collect diagnostics ──────────────────────────────────────
+    visible_tabs: list[str] = []
+    try:
+        candidates = await page.query_selector_all(
+            '[role="tab"], button[data-tab-index], .hh2c6, button[aria-label]'
+        )
+        for el in candidates:
+            try:
+                txt  = (await el.inner_text()).strip()
+                aria = (await el.get_attribute("aria-label") or "").strip()
+                label = txt or aria
+                if label and label not in visible_tabs:
+                    visible_tabs.append(label[:45])
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    tabs_str = ", ".join(visible_tabs[:8]) if visible_tabs else "none"
+    detail = (
+        f"Reviews tab not found | "
+        f"URL: {current_url[:65]} | "
+        f"Tabs visible: [{tabs_str}]"
+    )
+    print(f"    [tab] ✗ {detail}")
+    return False, detail
+
+
+# ---------------------------------------------------------------------------
+# Sort + extract
+# ---------------------------------------------------------------------------
+
+async def sort_by_newest(page):
+    for sel in ['button[aria-label*="Sort reviews"]', 'button[aria-label*="sort" i]', '.fxNQSd button']:
+        try:
+            btn = page.locator(sel).first
+            if await btn.is_visible(timeout=2000):
+                await btn.click()
+                await page.wait_for_timeout(800)
+                for nsel in ['[data-index="1"]', 'li:nth-child(2)',
+                             '[aria-label*="Newest"]', 'li:has-text("Newest")']:
+                    try:
+                        newest = page.locator(nsel).first
+                        if await newest.is_visible(timeout=1000):
+                            await newest.click()
+                            await page.wait_for_timeout(1500)
+                            return
+                    except Exception:
+                        pass
+                break
         except Exception:
             pass
 
@@ -128,7 +529,6 @@ async def extract_from_dom(page, seen_ids: set) -> list:
     new_reviews = []
     els = await page.query_selector_all('[data-review-id]')
 
-    # Expand "See more" buttons for full text before reading
     for sel in ['button[aria-label*="See more"]', 'button.w8nwRe']:
         try:
             btns = await page.query_selector_all(sel)
@@ -182,10 +582,8 @@ async def extract_from_dom(page, seen_ids: set) -> list:
                     if text:
                         break
 
+            # Owner response — Strategy 1: JavaScript evaluation (resilient to CSS class churn)
             owner_resp = ""
-            # Strategy 1: JavaScript evaluation — most resilient to CSS class churn.
-            # Finds the owner-response container by class OR by label text, strips
-            # the "Response from the owner" header, and returns the reply body.
             try:
                 owner_resp = (await el.evaluate("""el => {
                     const HEADER = 'response from the owner';
@@ -219,11 +617,8 @@ async def extract_from_dom(page, seen_ids: set) -> list:
             # Strategy 2: CSS selector fallback
             if not owner_resp:
                 for sel in [
-                    '.CDe7pd .MyEned span[jslog]',
-                    '.CDe7pd .MyEned span',
-                    '.CDe7pd span',
-                    '.mTHi3d span',
-                    '[data-reply-id] span',
+                    '.CDe7pd .MyEned span[jslog]', '.CDe7pd .MyEned span',
+                    '.CDe7pd span', '.mTHi3d span', '[data-reply-id] span',
                 ]:
                     re_el = await el.query_selector(sel)
                     if re_el:
@@ -231,6 +626,11 @@ async def extract_from_dom(page, seen_ids: set) -> list:
                         if candidate and candidate.lower() != "response from the owner":
                             owner_resp = candidate
                             break
+
+            if owner_resp:
+                print(f"      [RESPONSE] Found for {name[:40]}")
+            else:
+                print(f"      [NO RESPONSE] {name[:40]}")
 
             if name or text:
                 new_reviews.append({
@@ -273,7 +673,6 @@ async def scroll_and_extract(page, max_reviews: int) -> list:
         dom_count = len(await page.query_selector_all('[data-review-id]'))
         new_in_dom = dom_count - len(seen_ids)
 
-        # Extract in batches to free Chrome from holding too many live element refs
         if new_in_dom >= EXTRACT_EVERY or dom_count >= max_reviews:
             batch = await extract_from_dom(page, seen_ids)
             all_reviews.extend(batch)
@@ -288,199 +687,86 @@ async def scroll_and_extract(page, max_reviews: int) -> list:
             stall = 0
         prev_dom_count = dom_count
 
-    # Final extract pass for any remaining unseen reviews
     final = await extract_from_dom(page, seen_ids)
     all_reviews.extend(final)
     return all_reviews
 
 
-async def go_to_reviews_tab(page):
-    """Click the Reviews tab. Returns True on success, False if not found."""
+# ---------------------------------------------------------------------------
+# Main scrape loop
+# ---------------------------------------------------------------------------
 
-    # Strategy 1: direct aria-label selectors (most reliable across Maps layouts)
-    for sel in [
-        'button[aria-label^="Reviews"]',
-        'button[aria-label*=" reviews"]',
-        'button[aria-label*="Reviews,"]',
-        '[role="tab"][aria-label*="Review"]',
-        '[role="tab"]:has-text("Reviews")',
-        'button:has-text("Reviews")',
-        '.hh2c6:has-text("Reviews")',
-    ]:
-        try:
-            btn = page.locator(sel).first
-            if await btn.is_visible(timeout=2500):
-                await btn.click()
-                await page.wait_for_timeout(2500)
-                # Verify review content appeared
-                if await page.query_selector('[data-review-id]') or \
-                   await page.query_selector('div[role="feed"]'):
-                    return True
-                return True  # tab clicked even if no reviews yet
-        except Exception:
-            pass
-
-    # Strategy 2: iterate all tab/button elements looking for "review" text
-    for tab_sel in ['[role="tab"]', 'button[data-tab-index]', '.hh2c6', '.RWPxGd button']:
-        try:
-            tabs = await page.query_selector_all(tab_sel)
-            for tab in tabs:
-                try:
-                    txt = (await tab.inner_text()).lower().strip()
-                    if "review" in txt:
-                        await tab.click()
-                        await page.wait_for_timeout(2500)
-                        return True
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-    # Strategy 3: look for a "Reviews" link in the place panel
-    for link_sel in [
-        'a[href*="#lrd"]', 'a[aria-label*="Review"]',
-        'a[data-item-id*="review"]',
-    ]:
-        try:
-            link = page.locator(link_sel).first
-            if await link.is_visible(timeout=1000):
-                await link.click()
-                await page.wait_for_timeout(2500)
-                if await page.query_selector('[data-review-id]'):
-                    return True
-        except Exception:
-            pass
-
-    return False
-
-
-async def sort_by_newest(page):
-    for sel in ['button[aria-label*="Sort reviews"]', 'button[aria-label*="sort" i]',
-                '.fxNQSd button']:
-        try:
-            btn = page.locator(sel).first
-            if await btn.is_visible(timeout=2000):
-                await btn.click()
-                await page.wait_for_timeout(800)
-                for nsel in ['[data-index="1"]', 'li:nth-child(2)',
-                             '[aria-label*="Newest"]', 'li:has-text("Newest")']:
-                    try:
-                        newest = page.locator(nsel).first
-                        if await newest.is_visible(timeout=1000):
-                            await newest.click()
-                            await page.wait_for_timeout(1500)
-                            return
-                    except Exception:
-                        pass
-                break
-        except Exception:
-            pass
-
-
-async def scroll_reviews(page, max_reviews=200):
-    feed = None
-    for sel in ['div[role="feed"]', '.m6QErb[role="feed"]', '.DxyBCb']:
-        try:
-            el = await page.query_selector(sel)
-            if el:
-                feed = el
-                break
-        except Exception:
-            pass
-
-    prev = 0
-    stall = 0
-    for _ in range(300):
-        if feed:
-            await feed.evaluate("el => el.scrollTop = el.scrollHeight")
-        else:
-            await page.keyboard.press("End")
-        await page.wait_for_timeout(1200)
-        count = len(await page.query_selector_all('[data-review-id]'))
-        if count >= max_reviews:
-            break
-        if count == prev:
-            stall += 1
-            if stall >= 4:
-                break
-        else:
-            stall = 0
-        prev = count
-    return count
-
-
-async def scrape_location(context, loc) -> tuple:
-    """Returns (reviews, error_message, maps_url).
-    error_message is None on success so callers can tell "found nothing" apart
-    from "the scrape itself failed". maps_url is the Google Maps place URL
-    captured after navigating to the reviews tab (empty string if unavailable)."""
+async def scrape_location(context, loc: dict) -> tuple:
+    """
+    Scrape one location. Returns (reviews, error_message, maps_url).
+    error_message is None on success; non-None means the scrape itself failed
+    (so callers can distinguish "found 0 reviews" from "navigation failed").
+    """
     name = loc["name"]
-    search = loc["search"]
-    print(f"  Scraping: {name}")
+    print(f"\n  ── {name} ──")
 
     page = await context.new_page()
     await page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
     try:
-        url = "https://www.google.com/maps/search/" + search.replace(" ", "+")
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_timeout(3000)
-        await dismiss_dialogs(page)
+        # ── Step 1: Navigate to place panel ──────────────────────────────
+        print(f"    Step 1/4: Navigate to place panel")
+        ok, nav_err = await navigate_to_place(page, loc)
+        if not ok:
+            await save_debug_snapshot(page, name, "nav-fail")
+            print(f"    ✗ Navigation failed: {nav_err}")
+            return [], nav_err, ""
 
-        # Click the first place result (multiple selector fallbacks for Maps layout changes)
-        for sel in ['.Nv2PK', '.hfpxzc', 'a[href*="/maps/place/"]', '.Io6YTe', '[data-value="Search Results"] .Nv2PK']:
-            try:
-                first = page.locator(sel).first
-                if await first.is_visible(timeout=2000):
-                    await first.click()
-                    await page.wait_for_timeout(3500)  # extra time for panel to fully load
-                    break
-            except Exception:
-                pass
-
-        # Give the business panel extra time to render tabs
-        await page.wait_for_timeout(1500)
-
-        if not await go_to_reviews_tab(page):
-            # One more wait + retry before giving up
-            await page.wait_for_timeout(3000)
-            if not await go_to_reviews_tab(page):
-                # Collect diagnostic info for a useful error message
-                try:
-                    visible_tabs = []
-                    for el in await page.query_selector_all('[role="tab"], button[data-tab-index]'):
-                        try:
-                            txt = (await el.inner_text()).strip()
-                            if txt:
-                                visible_tabs.append(txt)
-                        except Exception:
-                            pass
-                    tabs_found = ", ".join(visible_tabs[:6]) or "none"
-                except Exception:
-                    tabs_found = "unknown"
-                msg = f"Reviews tab not found (tabs visible: {tabs_found})"
-                print(f"    [SKIP] {msg}")
-                return [], msg, ""
-
-        # Capture the Maps place URL now that we're on the reviews tab —
-        # stored per-location so the dashboard can link directly to the business.
         maps_url = page.url or ""
-        if maps_url.startswith("https://www.google.com/maps/search/"):
-            maps_url = ""  # still on search page, not the place panel
+        if "/maps/search/" in maps_url:
+            maps_url = ""
+        print(f"    ✓ On place panel: {maps_url[:70]}")
 
+        # ── Step 2: Open Reviews tab ──────────────────────────────────────
+        print(f"    Step 2/4: Open Reviews tab")
+        found, tab_detail = await go_to_reviews_tab(page, name)
+        if not found:
+            # One more attempt after an extra wait
+            print(f"    → Waiting 5s and retrying Reviews tab...")
+            await page.wait_for_timeout(5000)
+            found, tab_detail = await go_to_reviews_tab(page, name)
+            if not found:
+                await save_debug_snapshot(page, name, "tab-fail")
+                print(f"    ✗ Reviews tab: {tab_detail}")
+                return [], tab_detail, maps_url
+
+        # Update maps_url now that we're on the reviews sub-page
+        maps_url = page.url or maps_url
+        if "/maps/search/" in maps_url:
+            maps_url = ""
+        print(f"    ✓ Reviews tab open: {maps_url[:70]}")
+
+        # ── Step 3: Sort newest first ─────────────────────────────────────
+        print(f"    Step 3/4: Sort by newest")
         await sort_by_newest(page)
+
+        # ── Step 4: Scroll + extract ──────────────────────────────────────
+        print(f"    Step 4/4: Scroll and extract (max {MAX_SCROLL})")
         reviews = await scroll_and_extract(page, MAX_SCROLL)
         with_resp = sum(1 for r in reviews if r.get("owner_response"))
-        print(f"    -> {len(reviews)} reviews scraped, {with_resp} with owner response")
+        print(f"    ✓ {len(reviews)} reviews, {with_resp} with owner response")
         return reviews, None, maps_url
+
     except Exception as e:
-        print(f"    [ERR] {e}")
+        print(f"    ✗ Exception: {e}")
+        try:
+            await save_debug_snapshot(page, name, "exception")
+        except Exception:
+            pass
         return [], str(e), ""
     finally:
         await page.close()
 
 
+# ---------------------------------------------------------------------------
+# CSV helpers
+# ---------------------------------------------------------------------------
+
 def load_existing() -> set:
-    """Return a set of canonical review-id keys (or location/reviewer/date/star fallback) for rows already saved."""
     if not REVIEWS_CSV.exists():
         return set()
     keys = set()
@@ -497,9 +783,7 @@ def is_duplicate(row: dict, existing_keys: set) -> bool:
 def append_to_csv(new_rows: list):
     with REVIEWS_CSV.open(encoding="utf-8") as f:
         existing = list(csv.DictReader(f))
-    # Deduplicate the combined set by canonical review id before writing.
-    # Prefer the more complete row when the same review appears twice
-    # (e.g. one copy has a real owner reply, the other has none/placeholder).
+
     def score(r):
         return (2 if r.get("owner_response") else 0) + (1 if r.get("review_text") else 0)
 
@@ -514,7 +798,13 @@ def append_to_csv(new_rows: list):
         w.writerows(best.values())
 
 
-def build_email_html(new_rows: list) -> str:
+# ---------------------------------------------------------------------------
+# Email
+# ---------------------------------------------------------------------------
+
+def build_email_html(new_rows: list, failed_locs: list[dict] | None = None) -> str:
+    """Build HTML for the new-reviews notification email.
+    failed_locs is a list of {name, error} dicts (failures that produced no reviews)."""
     by_loc = defaultdict(list)
     for r in new_rows:
         by_loc[r["location_name"]].append(r)
@@ -525,7 +815,7 @@ def build_email_html(new_rows: list) -> str:
     for loc_name, reviews in sorted(by_loc.items()):
         items = ""
         for r in reviews[:10]:
-            stars = int(r["star_rating"]) if r["star_rating"] else 0
+            stars   = int(r["star_rating"]) if r["star_rating"] else 0
             snippet = (r["review_text"] or "")[:200]
             if len(r["review_text"] or "") > 200:
                 snippet += "..."
@@ -544,14 +834,32 @@ def build_email_html(new_rows: list) -> str:
         <table style="width:100%;border-collapse:collapse">{items}</table>
         {more}""")
 
-    total = len(new_rows)
-    date_str = datetime.now().strftime("%B %d, %Y at %I:%M %p")
+    # Scraper failure summary block (only when there are failures)
+    failure_block = ""
+    if failed_locs:
+        items_html = "".join(
+            f"<li style='margin:4px 0'><strong>{f['name']}</strong> — "
+            f"<span style='color:#555;font-size:12px'>{f['error'][:200]}</span></li>"
+            for f in failed_locs[:21]
+        )
+        failure_block = f"""
+        <div style="background:#fff7ed;border-left:4px solid #f97316;padding:16px 20px;margin:20px 0;border-radius:0 8px 8px 0">
+          <p style="margin:0 0 6px;font-size:11px;font-weight:700;color:#c2410c;text-transform:uppercase">
+            Scraper — {len(failed_locs)} location(s) failed</p>
+          <p style="margin:0 0 10px;font-size:13px;color:#374151">
+            The following locations could not be scraped this run. See GitHub Actions logs for screenshots.</p>
+          <ul style="margin:0;padding-left:20px;font-size:13px;color:#374151">{items_html}</ul>
+        </div>"""
+
+    total     = len(new_rows)
+    date_str  = datetime.now().strftime("%B %d, %Y at %I:%M %p")
     return f"""
     <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
       <h2 style="background:#2c5282;color:white;padding:16px;margin:0">
         {total} New Review{'s' if total != 1 else ''} – LTA Dashboard
       </h2>
       <p style="color:#555;padding:12px">Detected on {date_str}</p>
+      {failure_block}
       {''.join(sections)}
       <p style="margin-top:24px;padding:12px;background:#f7f7f7;font-size:12px;color:#777">
         LTA Review Dashboard – auto-generated notification
@@ -565,15 +873,22 @@ def write_github_output(new_count: int, email_html: str):
         return
     with open(GITHUB_OUTPUT, "a") as f:
         f.write(f"new_count={new_count}\n")
-        # Multiline output uses heredoc syntax
         delimiter = "EOF_EMAIL"
         f.write(f"email_html<<{delimiter}\n{email_html}\n{delimiter}\n")
 
 
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
 async def main():
     from playwright.async_api import async_playwright
 
-    print(f"Starting scrape: {datetime.now()}")
+    print(f"Starting scrape: {datetime.now()} | LOCAL={LOCAL_MODE} | DEBUG={DEBUG_MODE}")
+    if DEBUG_MODE:
+        LOGS_DIR.mkdir(exist_ok=True)
+        print(f"Debug snapshots → {LOGS_DIR}")
+
     existing = load_existing()
     print(f"Existing reviews in CSV: {len(existing)}")
 
@@ -588,6 +903,7 @@ async def main():
     conn.commit()
     run_stats = {"attempted": 0, "succeeded": 0, "failed": 0, "new": 0, "edited": 0, "deleted": 0}
     run_errors = []
+    failed_locs: list[dict] = []
 
     all_scraped = []
     async with async_playwright() as p:
@@ -614,8 +930,6 @@ async def main():
             } for r in reviews]
             all_scraped.extend(loc_rows)
 
-            # Dual-write into SQLite (source of truth going forward) alongside
-            # the CSV write below (kept as a secondary, human-readable export).
             location_id = db.get_or_create_location(
                 conn, loc["name"], loc["city"], db.get_brand(loc["name"]), loc["search"],
                 maps_url=maps_url,
@@ -645,10 +959,11 @@ async def main():
             if error:
                 run_stats["failed"] += 1
                 run_errors.append(f"{loc['name']}: {error}")
+                failed_locs.append({"name": loc["name"], "error": error})
             else:
                 run_stats["succeeded"] += 1
-            run_stats["new"] += loc_new
-            run_stats["edited"] += loc_edited
+            run_stats["new"]     += loc_new
+            run_stats["edited"]  += loc_edited
             run_stats["deleted"] += loc_deleted
 
             conn.execute(
@@ -673,7 +988,7 @@ async def main():
     )
     conn.commit()
     conn.close()
-    print(f"SQLite run #{run_id}: {run_stats}")
+    print(f"\nSQLite run #{run_id}: {run_stats} | status={run_status}")
 
     new_rows = []
     for r in all_scraped:
@@ -682,12 +997,12 @@ async def main():
             new_rows.append(r)
             existing.add(key)
 
-    print(f"\nNew reviews found: {len(new_rows)}")
+    print(f"New reviews found: {len(new_rows)}")
 
     if new_rows:
         append_to_csv(new_rows)
         print(f"Updated {REVIEWS_CSV}")
-        email_html = build_email_html(new_rows)
+        email_html = build_email_html(new_rows, failed_locs if failed_locs else None)
         write_github_output(len(new_rows), email_html)
     else:
         write_github_output(0, "")
