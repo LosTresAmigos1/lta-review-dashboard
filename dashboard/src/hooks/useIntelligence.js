@@ -1,4 +1,5 @@
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useEffect } from 'react'
 
 async function fetchJSON(path) {
   const res = await fetch(path)
@@ -27,6 +28,21 @@ export function useLocationDetail(slug) {
     enabled: !!slug,
     ...OPTS,
   })
+}
+
+export function usePrefetchLocationDetails(stats) {
+  const qc = useQueryClient()
+  useEffect(() => {
+    if (!stats?.length) return
+    stats.forEach(loc => {
+      const slug = loc.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+      qc.prefetchQuery({
+        queryKey: ['location-detail', slug],
+        queryFn: () => fetchJSON(`/data/intelligence/locations/${slug}.json`),
+        staleTime: 1000 * 60 * 10,
+      })
+    })
+  }, [stats, qc])
 }
 
 export function useLocationReviews(slug) {

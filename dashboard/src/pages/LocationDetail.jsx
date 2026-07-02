@@ -6,7 +6,7 @@ import Badge from '../components/ui/Badge.jsx'
 import HealthRing from '../components/ui/HealthRing.jsx'
 import Skeleton from '../components/ui/Skeleton.jsx'
 import EmptyState from '../components/ui/EmptyState.jsx'
-import { useLocationStats, useLocationDetail } from '../hooks/useIntelligence.js'
+import { useLocationStats, useLocationDetail, usePrefetchLocationDetails } from '../hooks/useIntelligence.js'
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -320,6 +320,7 @@ function LocationDashboard({ loc, detail, loading }) {
 
 export default function LocationDetail({ allReviews = [], filtered = [], filters = {} }) {
   const { data: stats, isLoading: lStats } = useLocationStats()
+  usePrefetchLocationDetails(stats)
   const [selected, setSelected] = useState(null)
 
   const selectedLoc = useMemo(
