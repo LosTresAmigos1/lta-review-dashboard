@@ -71,7 +71,7 @@ jobs:
         if: steps.scrape.outputs.new_count != '0' && steps.scrape.outputs.new_count != ''
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
 
       - name: Deploy to Vercel
         if: steps.scrape.outputs.new_count != '0' && steps.scrape.outputs.new_count != ''
