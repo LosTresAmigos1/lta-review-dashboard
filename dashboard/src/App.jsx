@@ -34,7 +34,7 @@ function LoadingScreen() {
           Future Marketing Studio
         </p>
         <p className="text-lg font-bold" style={{ color: 'var(--color-text-1)' }}>
-          Review Intelligence
+          Future Insights
         </p>
       </div>
       <div className="flex items-center gap-2">

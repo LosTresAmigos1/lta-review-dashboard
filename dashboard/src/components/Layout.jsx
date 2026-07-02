@@ -47,7 +47,7 @@ function SidebarContent({ unansweredCount, onLinkClick }) {
           Future Marketing Studio
         </p>
         <h1 className="text-sm font-bold leading-tight" style={{ color: 'var(--color-text-1)' }}>
-          Review Intelligence
+          Future Insights
         </h1>
       </div>
 
@@ -162,7 +162,7 @@ export default function Layout({ unansweredCount = 0, children }) {
             </svg>
           </button>
           <span className="font-semibold text-sm truncate" style={{ color: 'var(--color-text-1)' }}>
-            {current?.label ?? 'Review Intelligence'}
+            {current?.label ?? 'Future Insights'}
           </span>
           {current?.id === 'actions' && unansweredCount > 0 && (
             <span className="ml-auto badge badge-danger">{unansweredCount} pending</span>
