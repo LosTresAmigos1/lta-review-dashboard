@@ -158,14 +158,16 @@ export default function GlobalFilters({ allReviews, filters, onChange }) {
             type="date"
             value={filters.start}
             onChange={e => set('start', e.target.value)}
-            className="text-xs border border-stone-200 rounded-lg px-2 py-1.5 text-stone-600 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent"
+            className="text-xs bg-white border border-stone-200 rounded-lg px-2 py-1.5 text-stone-700 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent"
+            style={{ colorScheme: 'light' }}
           />
           <span className="text-stone-300 text-xs font-medium">–</span>
           <input
             type="date"
             value={filters.end}
             onChange={e => set('end', e.target.value)}
-            className="text-xs border border-stone-200 rounded-lg px-2 py-1.5 text-stone-600 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent"
+            className="text-xs bg-white border border-stone-200 rounded-lg px-2 py-1.5 text-stone-700 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent"
+            style={{ colorScheme: 'light' }}
           />
         </div>
 
