@@ -12,6 +12,7 @@ import ScraperStatus   from './pages/ScraperStatus.jsx'
 import Reports         from './pages/Reports.jsx'
 import ComplaintIntelligence from './pages/ComplaintIntelligence.jsx'
 import { useReviewsData }    from './hooks/useReviewsData.js'
+import { useGlobalPrefetch } from './hooks/useIntelligence.js'
 import { filterReviews, getDefaultDateRange, getDateBounds } from './utils/dataUtils.js'
 
 // Pages that don't use the global filter bar
@@ -73,6 +74,7 @@ function ErrorScreen() {
 }
 
 function RootLayout() {
+  useGlobalPrefetch()
   const { data: allReviews, isLoading, isError } = useReviewsData()
   const [filters, setFilters] = useState(null)
   const location = useLocation()

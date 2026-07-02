@@ -30,6 +30,31 @@ export function useLocationDetail(slug) {
   })
 }
 
+// Prefetch all heavy data files in the background at app startup
+export function useGlobalPrefetch() {
+  const qc = useQueryClient()
+  useEffect(() => {
+    const files = [
+      ['kpis',              '/data/analytics/kpis.json'],
+      ['monthly-trend',     '/data/analytics/monthly-trend.json'],
+      ['location-stats',    '/data/analytics/location-stats.json'],
+      ['rankings',          '/data/analytics/rankings-30d.json'],
+      ['complaint-intel',   '/data/intelligence/complaint-intelligence.json'],
+      ['company-summary',   '/data/intelligence/company-summary.json'],
+      ['predictive-alerts', '/data/intelligence/predictive-alerts.json'],
+      ['response-drafts',   '/data/intelligence/response-drafts.json'],
+      ['action-items',      '/data/action-items.json'],
+    ]
+    files.forEach(([key, path]) => {
+      qc.prefetchQuery({
+        queryKey: [key],
+        queryFn: () => fetchJSON(path),
+        staleTime: 1000 * 60 * 10,
+      })
+    })
+  }, [qc])
+}
+
 export function usePrefetchLocationDetails(stats) {
   const qc = useQueryClient()
   useEffect(() => {
