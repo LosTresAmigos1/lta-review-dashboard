@@ -19,6 +19,7 @@ const TESTS = [
   'test_actions_endpoint.js',
   'test_session_accounts.js',
   'test_login.js',
+  'test_login_ui_redesign.js',
   'test_data_endpoint.js',
   'test_middleware.js',
   'test_endpoint_auth.js',
