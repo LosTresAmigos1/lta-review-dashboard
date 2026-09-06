@@ -23,7 +23,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "tenant-lifecycle-dispatch.yml"
-APPROVED_SHA = "64fa6a38d3106fda60e110af843af841807aed93"
+APPROVED_SHA = "f32a27d4f33f462c3d39bf56de28ccfb99083641"
 
 results = []
 
@@ -166,19 +166,57 @@ def test_validate_step_has_an_id_every_secret_step_can_reference():
 
 
 def test_operation_steps_have_no_always_override():
-    """The four operation steps rely on GitHub Actions' own default
+    """The operation-gated steps rely on GitHub Actions' own default
     behavior (a plain `if:` implicitly requires success() of every prior
     step) -- none of them may use always()/failure(), which would let
-    them run even after Validate inputs failed."""
+    them run even after Validate inputs failed. Multi-Tenant Phase 4O adds
+    a 7th: "Chain to Initial Sync", gated on
+    inputs.operation == 'provision' && steps.run_provisioning.outcome ==
+    'success' -- its `if:` still STARTS WITH 'inputs.operation ==', so it
+    is correctly picked up by this same filter."""
     _text, data = _load()
     steps = _steps(data)
     operation_steps = [s for s in steps if s.get("if", "").startswith("inputs.operation ==")]
-    assert len(operation_steps) == 6, f"expected exactly 6 operation-gated steps, found {len(operation_steps)}"
+    assert len(operation_steps) == 7, f"expected exactly 7 operation-gated steps, found {len(operation_steps)}"
     for s in operation_steps:
         cond = s["if"]
         assert "always()" not in cond and "failure()" not in cond, (
             f"step {s.get('name')!r} must not override the default success()-required behavior, got if: {cond!r}"
         )
+
+
+def test_chain_to_initial_sync_step_gating_and_env():
+    """Multi-Tenant Phase 4O's self-chain step: must fire ONLY when this
+    run's own 'Run provisioning' step (id: run_provisioning) genuinely
+    succeeded -- never the bare success() default, which would also fire
+    for every OTHER operation this workflow supports. Must carry ONLY
+    GITHUB_TOKEN (no production secret), dispatch operation=initial_sync
+    for the SAME server-derived tenant_id, and target the literal ref
+    'main' -- never a caller-controlled ref/branch/sha."""
+    _text, data = _load()
+    steps = _steps(data)
+
+    run_provisioning = next((s for s in steps if s.get("name") == "Run provisioning"), None)
+    assert run_provisioning is not None, "no 'Run provisioning' step found"
+    assert run_provisioning.get("id") == "run_provisioning", "'Run provisioning' must have id: run_provisioning for the chain step to reference"
+
+    chain = next((s for s in steps if s.get("name") == "Chain to Initial Sync"), None)
+    assert chain is not None, "no 'Chain to Initial Sync' step found"
+    assert chain["if"] == "inputs.operation == 'provision' && steps.run_provisioning.outcome == 'success'", (
+        f"unexpected gating condition: {chain['if']!r}"
+    )
+
+    env = chain.get("env", {})
+    assert set(env.keys()) == {"GH_TOKEN", "TENANT_ID"}, f"unexpected env keys on the chain step: {sorted(env.keys())}"
+    assert env["GH_TOKEN"] == "${{ secrets.GITHUB_TOKEN }}", "the chain step must use the run's own ambient GITHUB_TOKEN, never a dedicated PAT"
+    assert env["TENANT_ID"] == "${{ inputs.tenant_id }}", "the chain step must reuse THIS run's own server-derived tenant_id, never a new input"
+
+    run_script = chain["run"]
+    assert "inputs[operation]=initial_sync" in run_script, "the chain step must dispatch operation=initial_sync specifically"
+    assert "ref='main'" in run_script, "the chain step must target the literal ref 'main', never a caller-controlled ref"
+    assert "inputs[tenant_id]=$TENANT_ID" in run_script and "inputs[confirmation]=$TENANT_ID" in run_script, (
+        "the chained dispatch's tenant_id and confirmation must both be the SAME server-derived $TENANT_ID"
+    )
 
 
 def test_secret_bearing_summary_only_runs_after_successful_validation():
@@ -226,7 +264,7 @@ def test_validation_failure_reaches_no_secret_bearing_step_end_to_end():
     }
     assert secret_bearing_step_names == {
         "Run provisioning", "Run Initial Sync", "Apply entitlement change", "Diagnose Google status",
-        "Redis identity probe", "Credential key/schema audit", "Write job summary",
+        "Redis identity probe", "Credential key/schema audit", "Chain to Initial Sync", "Write job summary",
     }, f"unexpected set of secret-bearing steps: {secret_bearing_step_names}"
 
     for name in secret_bearing_step_names:
@@ -345,9 +383,15 @@ def test_no_app_or_python_implementation_files_on_main():
         assert not path.exists(), f"{path} must not be merged into main -- it must only ever be reached via the pinned checkout"
 
 
-def test_contents_read_only_permission():
+def test_permissions_are_the_minimum_deliberate_set():
+    """contents: read was the whole permission set before Multi-Tenant
+    Phase 4O. actions: write is a deliberate, reviewed addition -- it
+    exists solely so the "Chain to Initial Sync" step can dispatch a
+    follow-up run of this SAME workflow using the run's own ambient
+    GITHUB_TOKEN (verified live before use; see that step's own comment).
+    Anything beyond these two keys would be undocumented scope creep."""
     _text, data = _load()
-    assert data.get("permissions") == {"contents": "read"}
+    assert data.get("permissions") == {"contents": "read", "actions": "write"}
 
 
 def main() -> int:
@@ -360,6 +404,7 @@ def main() -> int:
     run("a fully valid dispatch is accepted", test_matching_confirmation_and_valid_input_succeeds)
     run("'Validate inputs' has id: validate", test_validate_step_has_an_id_every_secret_step_can_reference)
     run("operation steps have no always()/failure() override", test_operation_steps_have_no_always_override)
+    run("Chain to Initial Sync is gated on run_provisioning's own success, carries only GITHUB_TOKEN", test_chain_to_initial_sync_step_gating_and_env)
     run("secret-bearing summary only runs after successful validation", test_secret_bearing_summary_only_runs_after_successful_validation)
     run("failure summary carries no secrets and invokes no script", test_failure_summary_step_carries_no_secrets_and_invokes_no_script)
     run("a failed validation reaches NO secret-bearing step, end to end", test_validation_failure_reaches_no_secret_bearing_step_end_to_end)
@@ -369,7 +414,7 @@ def main() -> int:
     run("provisioning never receives Google secrets", test_provision_step_never_receives_google_secrets)
     run("concurrency remains tenant-scoped with cancel-in-progress: false", test_concurrency_remains_tenant_scoped)
     run("no multi-tenant app/Python implementation file is merged onto main", test_no_app_or_python_implementation_files_on_main)
-    run("workflow requests only contents: read", test_contents_read_only_permission)
+    run("workflow requests only the minimum deliberate permission set (contents: read, actions: write)", test_permissions_are_the_minimum_deliberate_set)
 
     print()
     if all(results):

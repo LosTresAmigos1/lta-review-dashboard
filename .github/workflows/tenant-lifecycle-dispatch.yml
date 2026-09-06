@@ -25,13 +25,14 @@ name: Tenant Lifecycle Dispatch (pinned)
 # does NOT rely solely on the workflow_dispatch `type: choice` schema),
 # ZERO production secrets are supplied to any later step. This is
 # structural, not incidental:
-#   - The six operation-gated steps (provision/initial_sync/
+#   - The seven operation-gated steps (provision/initial_sync/
 #     apply_entitlement_change/diagnose_google_status/redis_identity_probe/
-#     credential_key_audit) use a plain `if: inputs.operation == '...'`
-#     with no always()/failure() override, so GitHub Actions' own default
+#     credential_key_audit/the "Chain to Initial Sync" step added in
+#     revision 8 below) use a plain `if: inputs.operation == '...'` with
+#     no always()/failure() override, so GitHub Actions' own default
 #     behavior applies: a step with a plain `if:` implicitly requires
 #     success() of every prior step, so a failed "Validate inputs" already
-#     skips all six unconditionally -- this was already true before this
+#     skips all seven unconditionally -- this was already true before this
 #     revision and remains unchanged.
 #
 # revision 3: adds redis_identity_probe -- diagnoses whether GitHub
@@ -58,6 +59,27 @@ name: Tenant Lifecycle Dispatch (pinned)
 #
 # revision 7: removes encryption_key_challenge entirely (see above) -- no
 # other operation, its pinned SHA, or its own steps were touched.
+#
+# revision 8 (Multi-Tenant Phase 4O): automatic post-approval onboarding
+# handoff. Adds `permissions: actions: write` and a "Chain to Initial
+# Sync" step, gated on steps.run_provisioning.outcome == 'success', that
+# dispatches a follow-up operation=initial_sync run for the same tenant
+# using this run's own ambient GITHUB_TOKEN -- no new secret for this
+# leg. Verified live before implementation (a temporary, harmless
+# credential_key_audit -> redis_identity_probe self-chain test; both runs
+# succeeded, the chained run queued under the same per-tenant concurrency
+# group, and the triggering run never waited for it). The customer-facing
+# leg (locations_approved -> provisioning, and the dispatch of THIS
+# workflow's operation=provision in the first place) lives entirely in
+# dashboard/api/google/[action].js's approveLocations(), using a
+# separate, minimum-scope TENANT_PROVISIONING_DISPATCH_PAT Vercel secret
+# -- never this workflow, never GITHUB_TOKEN, never exposed to any
+# browser. PINNED_LIFECYCLE_SHA is bumped in the same revision to the
+# feature/multi-tenant-pryor commit that adds 'provisioning_dispatch_failed'
+# to provision_tenant.py's/tenant_config_store.py's accepted statuses (the
+# manual-recovery entry point for a stuck dispatch) -- without this bump,
+# a `provision` dispatch would still pin to the prior commit, which does
+# not recognize that status as re-enterable.
 #   - "Write job summary" is the one step that previously broke this
 #     invariant, because if: always() explicitly overrides the
 #     success()-required default. It is now split into two mutually
@@ -97,10 +119,10 @@ concurrency:
 
 permissions:
   contents: read
-  actions: write  # TEMPORARY, for a one-time live self-dispatch smoke test -- see the "TEMP self-chain test" step below.
+  actions: write  # Multi-Tenant Phase 4O: lets the "Chain to Initial Sync" step dispatch a follow-up run using this run's own ambient GITHUB_TOKEN -- no new secret. Verified live before use (see that step's own comment).
 
 env:
-  PINNED_LIFECYCLE_SHA: 64fa6a38d3106fda60e110af843af841807aed93
+  PINNED_LIFECYCLE_SHA: f32a27d4f33f462c3d39bf56de28ccfb99083641
 
 jobs:
   operate:
@@ -156,6 +178,7 @@ jobs:
         run: pip install cryptography
 
       - name: Run provisioning
+        id: run_provisioning
         if: inputs.operation == 'provision'
         env:
           TENANT_ID: ${{ inputs.tenant_id }}
@@ -220,7 +243,6 @@ jobs:
       # never needs CREDENTIAL_ENCRYPTION_KEY, Google secrets, or Blob
       # secrets at all.
       - name: Credential key/schema audit
-        id: credential_key_audit
         if: inputs.operation == 'credential_key_audit'
         env:
           TENANT_ID: ${{ inputs.tenant_id }}
@@ -228,39 +250,46 @@ jobs:
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
         run: python redis_credential_key_audit.py --tenant-id "$TENANT_ID"
 
-      # TEMPORARY -- one-time live smoke test for Multi-Tenant Phase 4O's
-      # GitHub self-chaining design (provisioning -> Initial Sync). Proves,
-      # with zero tenant-state risk: (1) this workflow's own ambient
-      # GITHUB_TOKEN, with `permissions: actions: write` added above, can
-      # successfully dispatch ANOTHER run of this SAME workflow file; (2)
-      # that second run queues under the SAME per-tenant concurrency group
-      # rather than racing it; (3) THIS run does not block/wait for the
-      # second run to start or finish. Chains off credential_key_audit
-      # (read-only, harmless) into a SEPARATE run of redis_identity_probe
-      # (also read-only, harmless, and has no further chaining of its own
-      # -- deliberately a DIFFERENT operation than this step's trigger, so
-      # there is no possibility of an infinite self-dispatch loop). Remove
-      # this step and the `actions: write` permission comment once the
-      # real provisioning->initial_sync chaining step (gated on
-      # steps.run_provisioning.outcome == 'success') has been added and
-      # this test's results are confirmed.
-      - name: TEMP self-chain test
-        if: inputs.operation == 'credential_key_audit' && steps.credential_key_audit.outcome == 'success'
+      # Multi-Tenant Phase 4O -- GitHub-internal chaining, provisioning ->
+      # Initial Sync. Verified live before this step was written (run
+      # 34050431863 -> chained run 34050442867, both successful): this
+      # workflow's own ambient GITHUB_TOKEN (with `permissions:
+      # actions: write` above) CAN dispatch another run of this same
+      # workflow file; the chained run queues safely under the identical
+      # per-tenant concurrency group; and this run never waits for the
+      # chained run to start or finish (the dispatch POST returns
+      # immediately, before the chained run even begins).
+      #
+      # Gated on steps.run_provisioning.outcome == 'success' -- NOT the
+      # bare success() default -- so it fires only when
+      # provision_tenant.py's own process genuinely exited zero. Confirmed
+      # by reading provision_tenant.py's main() directly: every failure
+      # path (a caught ProvisioningError, including the safe
+      # StaleProvisioningAttemptError "someone else is handling this"
+      # case, or any uncaught exception) returns/causes a non-zero exit,
+      # which GitHub Actions always reports as this step's outcome:
+      # 'failure' -- so a genuine provisioning failure structurally cannot
+      # reach this step.
+      #
+      # No new secret -- uses the same GITHUB_TOKEN every workflow run
+      # already receives automatically. tenant_id/confirmation are the
+      # SAME server-derived values already validated for THIS run; no new
+      # input surface, no caller-supplied ref/branch/SHA.
+      - name: Chain to Initial Sync
+        if: inputs.operation == 'provision' && steps.run_provisioning.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TENANT_ID: ${{ inputs.tenant_id }}
         run: |
           set -euo pipefail
-          echo "Dispatching a follow-up redis_identity_probe run for tenant=$TENANT_ID using this run's own GITHUB_TOKEN..."
           gh api --method POST \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             /repos/${{ github.repository }}/actions/workflows/tenant-lifecycle-dispatch.yml/dispatches \
             -f ref='main' \
-            -f "inputs[operation]=redis_identity_probe" \
+            -f "inputs[operation]=initial_sync" \
             -f "inputs[tenant_id]=$TENANT_ID" \
             -f "inputs[confirmation]=$TENANT_ID"
-          echo "Dispatch call returned (no wait for the second run) -- this step and the job now proceed to finish normally."
 
       # Only reachable when Validate inputs actually succeeded -- the one
       # place production secrets and tenant_status_report.py are used.
