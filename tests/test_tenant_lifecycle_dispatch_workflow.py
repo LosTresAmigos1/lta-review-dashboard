@@ -23,7 +23,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "tenant-lifecycle-dispatch.yml"
-APPROVED_SHA = "f32a27d4f33f462c3d39bf56de28ccfb99083641"
+APPROVED_SHA = "f7201436535e8dea0730c045d25407437941ca4e"
 
 results = []
 

@@ -80,6 +80,17 @@ name: Tenant Lifecycle Dispatch (pinned)
 # manual-recovery entry point for a stuck dispatch) -- without this bump,
 # a `provision` dispatch would still pin to the prior commit, which does
 # not recognize that status as re-enterable.
+#
+# revision 9 (Multi-Tenant Phase 4P): bumps PINNED_LIFECYCLE_SHA to the
+# feature/multi-tenant-pryor commit that removes the UNIQUE constraint on
+# locations.name and makes every per-location artifact/cache key
+# collision-safe (db.canonical_location_slugs()) -- fixes provisioning
+# for a tenant with multiple identically-named locations. No other part
+# of this workflow changed. (Process note: this bump was missed when that
+# commit was first pushed, causing one manual `provision` recovery
+# dispatch to run against the STILL-PINNED prior commit and fail with the
+# exact same UNIQUE-constraint error the fix was meant to resolve --
+# corrected here.)
 #   - "Write job summary" is the one step that previously broke this
 #     invariant, because if: always() explicitly overrides the
 #     success()-required default. It is now split into two mutually
@@ -122,7 +133,7 @@ permissions:
   actions: write  # Multi-Tenant Phase 4O: lets the "Chain to Initial Sync" step dispatch a follow-up run using this run's own ambient GITHUB_TOKEN -- no new secret. Verified live before use (see that step's own comment).
 
 env:
-  PINNED_LIFECYCLE_SHA: f32a27d4f33f462c3d39bf56de28ccfb99083641
+  PINNED_LIFECYCLE_SHA: f7201436535e8dea0730c045d25407437941ca4e
 
 jobs:
   operate:
