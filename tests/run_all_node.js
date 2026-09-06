@@ -47,6 +47,7 @@ const TESTS = [
   'test_priority_digest.js',
   'test_executive_intelligence_center_ui.js',
   'test_executive_intelligence_prefetch.js',
+  'test_intelligence_canonical_slug.js',
   'test_no_gmail_in_review_email_workflow.js',
   'test_settings_registry.js',
   'test_settings_routing.js',

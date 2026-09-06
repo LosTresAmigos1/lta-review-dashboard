@@ -236,6 +236,95 @@ class ProvisionTenantTestCase(unittest.TestCase):
         self.assertIsNotNone(config["provisioning"]["reviewDbEtag"])
 
     # -----------------------------------------------------------------
+    # Multi-Tenant Phase 4P: locations.name is display metadata, not an
+    # identifier -- a real multi-location chain can legitimately approve
+    # many identically-named locations at different addresses.
+    # -----------------------------------------------------------------
+
+    def test_provisioning_succeeds_with_many_duplicate_named_locations(self):
+        # 23 locations, matching the real incident this phase fixes --
+        # most share the exact display name "Los Tres Amigos" at distinct
+        # addresses/googleLocationIds; a few carry a different brand name,
+        # to prove disambiguation is scoped correctly (per-collision, not
+        # blanket) even within the same tenant.
+        locations = []
+        for i in range(1, 21):
+            locations.append((f"accounts/1/locations/{i}", "Los Tres Amigos", f"{i} Main St, City{i}"))
+        locations.append(("accounts/1/locations/21", "Los Tres Mex Grill", "21 Main St, City21"))
+        locations.append(("accounts/1/locations/22", "Rio Luna", "22 Main St, City22"))
+        locations.append(("accounts/1/locations/23", "Rio Luna", "23 Main St, City23"))
+        self.fake_store.approve(TENANT_A, locations)
+
+        result = pt.provision_tenant(TENANT_A)
+        self.assertEqual(result["outcome"], "provisioned", result)
+        self.assertEqual(result["locationIds"], list(range(1, 24)))
+
+        db_path = self._download_db(result["reviewDbBlobKey"])
+        rows = self._locations_table(db_path)
+        self.assertEqual(set(rows.keys()), set(range(1, 24)), "all 23 rows must persist, none dropped/overwritten")
+        for i in range(1, 21):
+            self.assertEqual(rows[i]["name"], "Los Tres Amigos")
+            self.assertEqual(rows[i]["gbp_location_name"], f"accounts/1/locations/{i}")
+        self.assertEqual(rows[22]["name"], "Rio Luna")
+        self.assertEqual(rows[23]["name"], "Rio Luna")
+        self.assertNotEqual(rows[22]["gbp_location_name"], rows[23]["gbp_location_name"])
+
+        meta = self._private_data_json(result["artifactGeneration"], TENANT_A, "meta.json")
+        self.assertEqual(len(meta["locations"]), 23)
+        slugs = [l["slug"] for l in meta["locations"]]
+        self.assertEqual(len(slugs), len(set(slugs)), f"every location must get a DISTINCT slug, got {slugs}")
+        location_ids_in_meta = {l["locationId"] for l in meta["locations"]}
+        self.assertEqual(location_ids_in_meta, set(range(1, 24)))
+        # Disambiguation must use the stable locationId, never array
+        # position or anything random -- and must be deterministic.
+        rio_luna_slugs = sorted(l["slug"] for l in meta["locations"] if l["name"] == "Rio Luna")
+        self.assertEqual(rio_luna_slugs, ["rio-luna-22", "rio-luna-23"])
+
+        # -------------------------------------------------------------
+        # Reviews stay attached to the correct locationId despite the
+        # name collision -- inserted directly here (Initial Sync's own
+        # job, out of scope for provisioning itself) to prove the FK/join
+        # invariant against the REAL provisioned database.
+        # -------------------------------------------------------------
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            now = "2026-01-01T00:00:00Z"
+            conn.execute(
+                "INSERT INTO reviews (location_id, dedup_key, gbp_review_name, reviewer_name, review_date, "
+                "star_rating, review_text, first_seen_at, last_seen_at) VALUES "
+                "(1, 'reviews/loc1-r1', 'reviews/loc1-r1', 'Alice', '2026-01-01', 5, 'Great at location 1!', ?, ?)",
+                (now, now),
+            )
+            conn.execute(
+                "INSERT INTO reviews (location_id, dedup_key, gbp_review_name, reviewer_name, review_date, "
+                "star_rating, review_text, first_seen_at, last_seen_at) VALUES "
+                "(2, 'reviews/loc2-r1', 'reviews/loc2-r1', 'Bob', '2026-01-01', 1, 'Bad at location 2.', ?, ?)",
+                (now, now),
+            )
+            conn.commit()
+            r1 = conn.execute(
+                "SELECT r.star_rating, r.review_text, l.id AS loc_id, l.name, l.gbp_location_name "
+                "FROM reviews r JOIN locations l ON l.id = r.location_id WHERE r.dedup_key = 'reviews/loc1-r1'"
+            ).fetchone()
+            r2 = conn.execute(
+                "SELECT r.star_rating, r.review_text, l.id AS loc_id, l.name, l.gbp_location_name "
+                "FROM reviews r JOIN locations l ON l.id = r.location_id WHERE r.dedup_key = 'reviews/loc2-r1'"
+            ).fetchone()
+            self.assertEqual(r1["loc_id"], 1)
+            self.assertEqual(r1["gbp_location_name"], "accounts/1/locations/1")
+            self.assertEqual(r1["star_rating"], 5)
+            self.assertEqual(r2["loc_id"], 2)
+            self.assertEqual(r2["gbp_location_name"], "accounts/1/locations/2")
+            self.assertEqual(r2["star_rating"], 1)
+            # Both locations share the IDENTICAL name -- the join must
+            # still resolve each review to its own distinct location row.
+            self.assertEqual(r1["name"], r2["name"], "sanity: both locations really do share the same display name")
+            self.assertNotEqual(r1["loc_id"], r2["loc_id"])
+        finally:
+            conn.close()
+
+    # -----------------------------------------------------------------
     # Multi-Tenant Phase 4O: automatic post-approval provisioning --
     # provision_tenant.py must accept 'provisioning' as a normal entry
     # status (not just 'locations_approved'), since the automatic trigger

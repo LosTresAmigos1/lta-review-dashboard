@@ -31,6 +31,7 @@ import db  # noqa: E402
 import google_api  # noqa: E402
 import provider_sync  # noqa: E402
 import provision_tenant as pt  # noqa: E402
+import tenant_artifact_export  # noqa: E402
 import tenant_blob_keys  # noqa: E402
 import tenant_blob_store  # noqa: E402
 import tenant_config_store  # noqa: E402
@@ -214,6 +215,34 @@ class ApplyEntitlementChangeTestCase(unittest.TestCase):
         if self._lta_db_mtime_before is not None:
             self.assertEqual(_LTA_REAL_DB_PATH.stat().st_mtime, self._lta_db_mtime_before,
                               "a test must never modify the real Los Tres Amigos reviews.db")
+
+    # -----------------------------------------------------------------
+    # Multi-Tenant Phase 4P: same _verify_artifact_generation() model as
+    # initial_sync.py -- see that file's own parity tests for the full
+    # rationale (a bare re-slugify of `name` would let two same-named
+    # locations' required artifacts collapse into one, false-passing).
+    # -----------------------------------------------------------------
+
+    def _base_artifacts(self):
+        return {p: b"{}" for p in tenant_artifact_export.REQUIRED_RELATIVE_PATHS}
+
+    def test_verify_artifact_generation_requires_both_duplicate_named_files(self):
+        locations = {14: {"name": "Los Tres Amigos"}, 22: {"name": "Los Tres Amigos"}}
+        artifacts = {
+            **self._base_artifacts(),
+            "reviews/by-location/los-tres-amigos-14.json": b"[]",
+            "reviews/by-location/los-tres-amigos-22.json": b"[]",
+        }
+        aec._verify_artifact_generation(artifacts, locations)  # must not raise
+
+    def test_verify_artifact_generation_fails_when_one_duplicate_named_file_is_missing(self):
+        locations = {14: {"name": "Los Tres Amigos"}, 22: {"name": "Los Tres Amigos"}}
+        artifacts = {
+            **self._base_artifacts(),
+            "reviews/by-location/los-tres-amigos-14.json": b"[]",
+        }
+        with self.assertRaises(aec.ArtifactPublicationError):
+            aec._verify_artifact_generation(artifacts, locations)
 
     def _mock_google(self, account, locations, reviews_by_location_id=None):
         reviews_by_location_id = reviews_by_location_id or {}

@@ -46,8 +46,15 @@ STOP_WORDS = {
 PRIVATE_DATA_DIR = db.BASE_DIR / "dashboard" / "private-data"
 
 
-def slugify(name: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+# Multi-Tenant Phase 4P: the bare regex used to live here (and, byte-for-
+# byte identically, in refresh_analytics.py and provision_tenant.py) --
+# centralized into db.py so there is exactly one algorithm. Every
+# per-location artifact path/cache key in this file must go through
+# _slug_map() below (collision-safe), never db.slugify() directly, since
+# a bare slugify(name) is exactly the bug this phase fixes (two same-named
+# locations silently overwriting each other's exported file).
+def _slug_map(locations: dict) -> dict:
+    return db.canonical_location_slugs({loc_id: l["name"] for loc_id, l in locations.items()})
 
 
 def write_json(rel_path: str, payload) -> None:
@@ -112,11 +119,18 @@ def export_reviews_csv(conn, out_path=None) -> None:
 
 
 def export_meta(conn, locations: dict) -> None:
+    slug_map = _slug_map(locations)
     loc_list = [
         {
             "locationId": l["id"],
             "name": l["name"], "city": l["city"], "brand": l["brand"],
-            "slug": slugify(l["name"]), "maps_url": l.get("maps_url") or "",
+            # Multi-Tenant Phase 4P: the ONE authoritative slug for this
+            # location -- collision-safe (see db.canonical_location_slugs()).
+            # Every frontend consumer must read THIS field rather than
+            # re-deriving a slug from name independently (useReviewsData.js
+            # already did; useIntelligence.js's two prefetch hooks did not
+            # -- fixed in the same phase).
+            "slug": slug_map[l["id"]], "maps_url": l.get("maps_url") or "",
             # Restaurant bad-review email workflow: a safe boolean signal
             # only -- lets the UI disable "Send to Restaurant" for an
             # unconfigured location without ever exposing the actual
@@ -323,12 +337,13 @@ def validate_location_analytics(conn, locations: dict) -> tuple:
 
 
 def export_reviews_by_location(conn, locations: dict) -> None:
+    slug_map = _slug_map(locations)
     for loc_id, loc in locations.items():
         rows = conn.execute(
             "SELECT * FROM reviews WHERE location_id = ? AND is_deleted = 0 ORDER BY review_date",
             (loc_id,),
         ).fetchall()
-        write_json(f"reviews/by-location/{slugify(loc['name'])}.json",
+        write_json(f"reviews/by-location/{slug_map[loc_id]}.json",
                    [review_to_dict(r, loc) for r in rows])
 
 
@@ -448,11 +463,12 @@ def export_gbp_sync_status(conn, locations: dict) -> None:
     """Per-location Google Business Profile linkage + sync state, plus the
     most recent api_sync run, for the Settings -> Connection Center's
     Location Sync view. Read-only summary of columns gbp_sync.py maintains."""
+    slug_map = _slug_map(locations)
     loc_list = [
         {
             "locationId": l["id"],
             "name": l["name"], "city": l["city"], "brand": l["brand"],
-            "slug": slugify(l["name"]),
+            "slug": slug_map[l["id"]],
             "linked": bool(l.get("gbp_location_name")),
             "gbp_verification_status": l.get("gbp_verification_status"),
             "gbp_last_synced_at": l.get("gbp_last_synced_at"),
@@ -542,7 +558,7 @@ def export_intelligence(conn, locations: dict) -> None:
     """Export AI-generated intelligence: summaries, complaint intel, predictions, drafts."""
     cache_rows = conn.execute("SELECT cache_key, payload FROM analytics_cache").fetchall()
     by_key = {r["cache_key"]: json.loads(r["payload"]) for r in cache_rows}
-    slug_to_id = {slugify(l["name"]): l["id"] for l in locations.values()}
+    slug_to_id = {slug: loc_id for loc_id, slug in _slug_map(locations).items()}
 
     # Company AI summary
     if "ai_company_summary" in by_key:
@@ -620,10 +636,11 @@ def export_location_detail_reviews(conn, locations: dict) -> None:
     Already handled by export_reviews_by_location; this augments with tags.
     """
     try:
-        from refresh_analytics import classify_review, slugify
+        from refresh_analytics import classify_review
     except ImportError:
         return
 
+    slug_map = _slug_map(locations)
     for loc_id, loc in locations.items():
         rows = conn.execute(
             "SELECT * FROM reviews WHERE location_id = ? AND is_deleted = 0 ORDER BY review_date DESC",
@@ -650,7 +667,7 @@ def export_location_detail_reviews(conn, locations: dict) -> None:
                 "ai_priority": rd.get("ai_priority"),
                 "gbp_review_name": rd.get("gbp_review_name"),
             })
-        write_json(f"reviews/by-location/{slugify(loc['name'])}.json", reviews_out)
+        write_json(f"reviews/by-location/{slug_map[loc_id]}.json", reviews_out)
 
 
 def export_review_location_index(conn, locations: dict) -> None:

@@ -29,6 +29,7 @@ import initial_sync as isync  # noqa: E402
 import provider_sync  # noqa: E402
 import provision_tenant as pt  # noqa: E402
 import tenant_approved_locations_provider as approved_provider  # noqa: E402
+import tenant_artifact_export  # noqa: E402
 import tenant_blob_keys  # noqa: E402
 import tenant_blob_store  # noqa: E402
 import tenant_config_store  # noqa: E402
@@ -193,6 +194,39 @@ class InitialSyncTestCase(unittest.TestCase):
         if self._lta_db_mtime_before is not None:
             self.assertEqual(_LTA_REAL_DB_PATH.stat().st_mtime, self._lta_db_mtime_before,
                               "an initial-sync test must never modify the real Los Tres Amigos reviews.db")
+
+    # -----------------------------------------------------------------
+    # Multi-Tenant Phase 4P: _verify_artifact_generation() must use the
+    # canonical, collision-safe slug -- a bare re-slugify of `name` would
+    # let two same-named locations' required artifacts silently collapse
+    # into requiring (and finding) only ONE file, false-passing while one
+    # location's real data was never generated at all.
+    # -----------------------------------------------------------------
+
+    def _base_artifacts(self):
+        return {p: b"{}" for p in tenant_artifact_export.REQUIRED_RELATIVE_PATHS}
+
+    def test_verify_artifact_generation_requires_both_duplicate_named_files(self):
+        locations = {14: {"name": "Los Tres Amigos"}, 22: {"name": "Los Tres Amigos"}}
+        artifacts = {
+            **self._base_artifacts(),
+            "reviews/by-location/los-tres-amigos-14.json": b"[]",
+            "reviews/by-location/los-tres-amigos-22.json": b"[]",
+        }
+        isync._verify_artifact_generation(artifacts, locations)  # must not raise
+
+    def test_verify_artifact_generation_fails_when_one_duplicate_named_file_is_missing(self):
+        locations = {14: {"name": "Los Tres Amigos"}, 22: {"name": "Los Tres Amigos"}}
+        artifacts = {
+            **self._base_artifacts(),
+            "reviews/by-location/los-tres-amigos-14.json": b"[]",
+            # id 22's own artifact is missing -- the exact silent-loss
+            # scenario a bare `slugify(name)` would have false-passed by
+            # only ever requiring "reviews/by-location/los-tres-amigos.json"
+            # once, satisfied by either location's file interchangeably.
+        }
+        with self.assertRaises(isync.ArtifactPublicationError):
+            isync._verify_artifact_generation(artifacts, locations)
 
     # -----------------------------------------------------------------
     # Fixture helper: provisions a tenant for real via provision_tenant.py

@@ -158,6 +158,54 @@ def test_export_meta_locationId_stable_across_repeated_exports():
         assert ids_seen == {loc_id}, f"locationId must be identical across repeated exports, saw {ids_seen}"
 
 
+# --- Multi-Tenant Phase 4P: duplicate display names --------------------------
+
+def test_duplicate_named_locations_export_to_two_distinct_files():
+    with ScratchExport() as ex:
+        id_a = _add_location(ex.conn, "Los Tres Amigos", city="Springfield")
+        id_b = _add_location(ex.conn, "Los Tres Amigos", city="Shelbyville")
+        _add_review(ex.conn, id_a, "2026-01-01", star_rating=5, reviewer_name="Alice")
+        _add_review(ex.conn, id_b, "2026-01-01", star_rating=1, reviewer_name="Bob")
+        locations = _locations_dict(ex.conn)
+
+        export_chunks.export_meta(ex.conn, locations)
+        export_chunks.export_reviews_by_location(ex.conn, locations)
+        meta = ex.read_json("meta.json")
+
+        by_id = {l["locationId"]: l for l in meta["locations"]}
+        slug_a, slug_b = by_id[id_a]["slug"], by_id[id_b]["slug"]
+        assert slug_a != slug_b, f"two same-named locations must get DISTINCT slugs, both got {slug_a!r}"
+        assert slug_a in (f"los-tres-amigos-{id_a}",) and slug_b in (f"los-tres-amigos-{id_b}",), \
+            f"disambiguation must use the stable locationId, got {slug_a!r}/{slug_b!r}"
+
+        file_a = ex.read_json(f"reviews/by-location/{slug_a}.json")
+        file_b = ex.read_json(f"reviews/by-location/{slug_b}.json")
+        assert (ex.private_data_dir / f"reviews/by-location/{slug_a}.json") != (ex.private_data_dir / f"reviews/by-location/{slug_b}.json")
+        assert len(file_a) == 1 and len(file_b) == 1, "each location's own file must contain exactly its own review, neither overwritten by the other"
+        assert file_a[0]["reviewer_name"] == "Alice" and file_a[0]["star_rating"] == 5
+        assert file_b[0]["reviewer_name"] == "Bob" and file_b[0]["star_rating"] == 1
+        assert file_a[0]["locationId"] == id_a
+        assert file_b[0]["locationId"] == id_b
+
+
+def test_meta_json_exposes_distinct_canonical_slugs_for_many_duplicates():
+    with ScratchExport() as ex:
+        ids = [_add_location(ex.conn, "Los Tres Amigos", city=f"City{i}") for i in range(5)]
+        # And one genuinely unique name, which must stay bare (clean where possible).
+        unique_id = _add_location(ex.conn, "Casa Tequila Prime", city="Uniqueville")
+        locations = _locations_dict(ex.conn)
+
+        export_chunks.export_meta(ex.conn, locations)
+        meta = ex.read_json("meta.json")
+
+        slugs = [l["slug"] for l in meta["locations"]]
+        assert len(slugs) == len(set(slugs)), f"every location must get a distinct slug, got {slugs}"
+        by_id = {l["locationId"]: l for l in meta["locations"]}
+        for lid in ids:
+            assert by_id[lid]["slug"] == f"los-tres-amigos-{lid}"
+        assert by_id[unique_id]["slug"] == "casa-tequila-prime", "a genuinely unique name must stay a clean, bare slug"
+
+
 # --- export_gbp_sync_status ---------------------------------------------------
 
 def test_export_gbp_sync_status_includes_locationId():
@@ -399,7 +447,7 @@ def test_export_provider_health_result_matches_compute_health_directly():
 def test_export_intelligence_injects_locationId_into_location_detail():
     with ScratchExport() as ex:
         loc_id = _add_location(ex.conn, "Intel Location")
-        slug = export_chunks.slugify("Intel Location")
+        slug = db.slugify("Intel Location")
         ex.conn.execute(
             "INSERT INTO analytics_cache (cache_key, payload) VALUES (?, ?)",
             (f"location_detail_{slug}", json.dumps({"name": "Intel Location", "healthScore": 90})),
@@ -416,7 +464,7 @@ def test_export_intelligence_injects_locationId_into_location_detail():
 def test_export_intelligence_does_not_clobber_existing_locationId():
     with ScratchExport() as ex:
         _add_location(ex.conn, "Preexisting Location")
-        slug = export_chunks.slugify("Preexisting Location")
+        slug = db.slugify("Preexisting Location")
         ex.conn.execute(
             "INSERT INTO analytics_cache (cache_key, payload) VALUES (?, ?)",
             (f"location_detail_{slug}", json.dumps({"locationId": 999999, "name": "Preexisting Location"})),
@@ -455,7 +503,7 @@ def test_export_location_detail_reviews_includes_locationId():
         locations = _locations_dict(ex.conn)
 
         export_chunks.export_location_detail_reviews(ex.conn, locations)
-        slug = export_chunks.slugify("Detail Review Location")
+        slug = db.slugify("Detail Review Location")
         payload = ex.read_json(f"reviews/by-location/{slug}.json")
         assert len(payload) == 1
         assert payload[0]["locationId"] == loc_id
@@ -554,6 +602,8 @@ def main():
     run("export_meta(): hasContact is false when the contact is inactive", test_export_meta_has_contact_false_when_inactive)
     run("export_location_contacts(): includes only configured+active locations, keyed by locationId", test_export_location_contacts_includes_only_configured_active_locations)
     run("export_location_contacts(): keys are the canonical numeric locationId as a string", test_export_location_contacts_keyed_by_location_id_string)
+    run("Phase 4P: duplicate-named locations export to two distinct files", test_duplicate_named_locations_export_to_two_distinct_files)
+    run("Phase 4P: meta.json exposes distinct canonical slugs for many duplicates", test_meta_json_exposes_distinct_canonical_slugs_for_many_duplicates)
 
     print()
     if all(results):

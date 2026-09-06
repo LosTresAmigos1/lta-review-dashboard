@@ -297,8 +297,13 @@ def _verify_artifact_generation(artifacts: dict[str, bytes], locations: dict[int
     for rel_path in tenant_artifact_export.REQUIRED_RELATIVE_PATHS:
         if rel_path not in artifacts:
             raise ArtifactPublicationError(f"required artifact {rel_path!r} was not generated")
-    for loc in locations.values():
-        slug_key = f"reviews/by-location/{provision_tenant._slugify(loc['name'])}.json"
+    # Multi-Tenant Phase 4P: the canonical, collision-safe slug -- NOT a
+    # bare re-slugify of `name` -- so two same-named locations are each
+    # required (and verified) as their own distinct artifact, never
+    # silently satisfied by the same file.
+    slug_map = db.canonical_location_slugs({lid: loc["name"] for lid, loc in locations.items()})
+    for loc_id, loc in locations.items():
+        slug_key = f"reviews/by-location/{slug_map[loc_id]}.json"
         if slug_key not in artifacts:
             raise ArtifactPublicationError(f"required per-location artifact {slug_key!r} was not generated")
 
