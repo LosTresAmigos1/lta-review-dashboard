@@ -21,7 +21,7 @@
 // Vercel/Node populates req.query.action from the URL segment, exactly as
 // it already does for actions/[action].js and session/[action].js.
 
-import { randomBytes } from 'crypto'
+import { randomBytes, randomUUID } from 'crypto'
 import { setCookie, parseCookies, clearCookie } from './_lib/cookies.js'
 import { fetchWithRetry } from './_lib/http.js'
 import { exchangeRefreshToken, getAccessToken } from './_lib/googleAuth.js'
@@ -42,7 +42,10 @@ import {
 import { recordReplyFailure, clearReplyFailure } from '../_lib/notificationStore.js'
 import { resolveTenantId, DEFAULT_TENANT_ID } from '../_lib/tenants.js'
 import { createDiscoverySession, getDiscoverySession } from '../_lib/locationDiscoveryStore.js'
-import { recordLocationApproval, LocationApprovalNotEligibleError, getTenantConfig, LOCATION_APPROVAL_ELIGIBLE_STATUSES } from '../_lib/tenantConfigStore.js'
+import {
+  recordLocationApproval, LocationApprovalNotEligibleError, getTenantConfig, LOCATION_APPROVAL_ELIGIBLE_STATUSES,
+  markTenantProvisioningDispatched, markTenantProvisioningDispatchFailed, ConfigVersionConflictError,
+} from '../_lib/tenantConfigStore.js'
 import { reconcileApprovedLocationsAgainstDiscovery, UnreconciledApprovedLocationError } from '../_lib/tenantLocationReconciliation.js'
 import { discoverGoogleLocationIdsForReconciliation } from '../_lib/googleLocationDiscovery.js'
 
@@ -1531,6 +1534,115 @@ async function discoverLocations(req, res) {
 // explicit "hand off this discovery" step rather than silently allow it.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Multi-Tenant Phase 4O -- automatic post-approval provisioning handoff.
+// dispatchTenantLifecycleWorkflow() calls THIS repo's own pinned dispatcher
+// (.github/workflows/tenant-lifecycle-dispatch.yml on main) -- the exact
+// same trusted, pinned-commit execution engine every manual operator
+// dispatch has used throughout this project. Deliberately a SEPARATE repo
+// and token from triggerSync()/triggerImport() above, which target Los
+// Tres Amigos's own legacy repo with GITHUB_SYNC_PAT -- that token has no
+// relationship to this one and is never used here.
+// ---------------------------------------------------------------------------
+const TENANT_LIFECYCLE_REPO_OWNER = 'Leninf19'
+const TENANT_LIFECYCLE_REPO_NAME = 'PRYOR-OS'
+const TENANT_LIFECYCLE_WORKFLOW_FILE = 'tenant-lifecycle-dispatch.yml'
+const TENANT_LIFECYCLE_DISPATCH_TIMEOUT_MS = 10_000
+
+// Calls GitHub's workflow_dispatch REST API with a bounded timeout, and
+// classifies the outcome into exactly the three cases the CAS/reconciliation
+// design distinguishes -- never a fourth, ambiguous "maybe" bucket beyond
+// what's documented below:
+//   'accepted' -- GitHub responded 204: the dispatch event is durably
+//                 recorded on GitHub's side and WILL result in a run.
+//   'rejected' -- GitHub responded with a clean 4xx: the dispatch was
+//                 DEFINITELY not accepted (bad inputs, auth problem,
+//                 workflow/repo not found) -- safe to treat as an
+//                 immediate, definite failure, no waiting required.
+//   'ambiguous' -- a network-level exception (timeout, connection reset,
+//                 DNS/TLS failure) OR any 5xx from GitHub's own edge --
+//                 GitHub's response, if it even reaches us, gives no
+//                 guarantee the request wasn't already processed
+//                 server-side. NEVER treated as failure by the caller;
+//                 resolved later by reconcileStuckProvisioningDispatch()
+//                 (tenantConfigStore.js), which watches for real progress
+//                 instead of guessing from this HTTP-level signal alone.
+// Never accepts a caller-supplied ref/branch/SHA -- `ref: 'main'` is a
+// fixed literal, exactly like every other property of this call.
+async function dispatchTenantLifecycleWorkflow(operation, tenantId) {
+  const pat = process.env.TENANT_PROVISIONING_DISPATCH_PAT
+  if (!pat) return { outcome: 'ambiguous', reason: 'TENANT_PROVISIONING_DISPATCH_PAT is not configured' }
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), TENANT_LIFECYCLE_DISPATCH_TIMEOUT_MS)
+  try {
+    const r = await fetch(
+      `https://api.github.com/repos/${TENANT_LIFECYCLE_REPO_OWNER}/${TENANT_LIFECYCLE_REPO_NAME}/actions/workflows/${TENANT_LIFECYCLE_WORKFLOW_FILE}/dispatches`,
+      {
+        method:  'POST',
+        signal:  controller.signal,
+        headers: {
+          Authorization:          `Bearer ${pat}`,
+          Accept:                 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28',
+          'Content-Type':         'application/json',
+        },
+        body: JSON.stringify({ ref: 'main', inputs: { operation, tenant_id: tenantId, confirmation: tenantId } }),
+      }
+    )
+    if (r.status === 204) return { outcome: 'accepted' }
+    if (r.status >= 400 && r.status < 500) {
+      const body = await r.json().catch(() => ({}))
+      return { outcome: 'rejected', status: r.status, message: body.message || `GitHub API returned status ${r.status}.` }
+    }
+    // Any 5xx (or an unexpected 2xx/3xx this endpoint doesn't document) is
+    // treated as ambiguous, never a definite outcome either way.
+    return { outcome: 'ambiguous', reason: `unexpected HTTP status ${r.status}` }
+  } catch (err) {
+    return { outcome: 'ambiguous', reason: err.name === 'AbortError' ? 'request timed out' : err.message }
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+// Fire-and-forget from approveLocations()'s perspective in the sense that
+// its outcome never changes the HTTP response shape returned to the
+// browser -- but it IS awaited, so a definite rejection can be recorded
+// synchronously rather than left for the reconciliation pass. Never
+// throws -- every failure mode (CAS lost, dispatch rejected, dispatch
+// ambiguous) is handled internally, since a customer's location approval
+// must never fail or error out because of anything on this path.
+async function triggerAutomaticProvisioning(tenantId, config) {
+  // Explicit, redundant LTA exclusion -- structurally near-impossible
+  // already (LTA never reaches approveLocations() at all: it has no
+  // discovery/approval flow, see tenants.js's LocationCatalogMigrationMode),
+  // but this makes the exclusion self-evident at the exact call site
+  // rather than merely incidental.
+  if (tenantId === DEFAULT_TENANT_ID) return
+
+  const dispatchAttemptId = randomUUID()
+  let claimed
+  try {
+    claimed = await markTenantProvisioningDispatched(tenantId, { dispatchAttemptId, expectedVersion: config.configVersion })
+  } catch (err) {
+    if (err instanceof ConfigVersionConflictError) return // lost the race -- another concurrent approval already claimed/dispatched
+    throw err
+  }
+
+  const result = await dispatchTenantLifecycleWorkflow('provision', tenantId)
+  if (result.outcome === 'rejected') {
+    try {
+      await markTenantProvisioningDispatchFailed(tenantId, `GitHub dispatch rejected (${result.status}): ${result.message}`, { expectedVersion: claimed.configVersion })
+    } catch (err) {
+      if (!(err instanceof ConfigVersionConflictError)) throw err // otherwise: something newer already happened -- leave it alone
+    }
+  }
+  // 'accepted' -- nothing further to do; normal status polling takes over.
+  // 'ambiguous' -- deliberately left at 'provisioning' with dispatchedAt
+  // already stamped by the claim above; reconcileStuckProvisioningDispatch()
+  // resolves it on a later status read, never here.
+}
+
 async function approveLocations(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'method_not_allowed', message: 'Method not allowed' })
 
@@ -1619,7 +1731,23 @@ async function approveLocations(req, res) {
     message: `Activated the location catalog with ${config.approvedLocations.length} approved location(s).`,
   })
 
-  return res.status(200).json({ success: true, tenantId, activatedLocationCount: config.approvedLocations.length, status: config.status })
+  // Multi-Tenant Phase 4O: automatically claims the provisioning dispatch
+  // and triggers it server-side -- see triggerAutomaticProvisioning()'s own
+  // header for the full CAS/classification model. Awaited so a definite
+  // rejection is reflected in THIS response's `status` immediately, but
+  // never throws and never changes this endpoint's response SHAPE --
+  // approving locations itself already succeeded regardless of what
+  // happens next.
+  let responseStatus = config.status
+  try {
+    await triggerAutomaticProvisioning(tenantId, config)
+    const fresh = await getTenantConfig(tenantId)
+    if (fresh) responseStatus = fresh.status
+  } catch (err) {
+    console.error(`[approveLocations] automatic provisioning trigger failed unexpectedly for ${tenantId}: ${err.message}`)
+  }
+
+  return res.status(200).json({ success: true, tenantId, activatedLocationCount: config.approvedLocations.length, status: responseStatus })
 }
 
 // ---------------------------------------------------------------------------

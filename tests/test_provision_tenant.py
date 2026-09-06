@@ -235,6 +235,64 @@ class ProvisionTenantTestCase(unittest.TestCase):
         self.assertEqual(config["storageMode"], "BLOB")
         self.assertIsNotNone(config["provisioning"]["reviewDbEtag"])
 
+    # -----------------------------------------------------------------
+    # Multi-Tenant Phase 4O: automatic post-approval provisioning --
+    # provision_tenant.py must accept 'provisioning' as a normal entry
+    # status (not just 'locations_approved'), since the automatic trigger
+    # (dashboard/api/google/[action].js's approveLocations()) CAS-claims
+    # the transition to 'provisioning' itself BEFORE dispatching this
+    # script -- the script must never fail merely because the caller
+    # already advanced the status.
+    # -----------------------------------------------------------------
+
+    def test_automatic_trigger_entry_from_provisioning_status_succeeds_identically(self):
+        self.fake_store.approve(TENANT_A, [
+            ("accounts/1/locations/1", "Restaurant A", "1 Main St, Springfield"),
+        ])
+        # Simulate the Node-side CAS claim (markTenantProvisioningDispatched)
+        # that already happened before this script was dispatched -- status
+        # is 'provisioning', not 'locations_approved', when this script starts.
+        config = self.fake_store.get(TENANT_A)
+        self.fake_store.upsert(TENANT_A, {
+            "status": "provisioning",
+            "provisioning": {**config["provisioning"], "dispatchAttemptId": "test-dispatch-id", "dispatchedAt": "2026-01-01T00:00:00Z"},
+        }, expected_version=config["configVersion"])
+
+        result = pt.provision_tenant(TENANT_A)
+        self.assertEqual(result["outcome"], "provisioned")
+        self.assertEqual(result["locationIds"], [1])
+
+        final = self.fake_store.get(TENANT_A)
+        self.assertEqual(final["status"], "provisioned")
+        self.assertEqual(final["provisioning"]["status"], "provisioned")
+        # Note: dispatchAttemptId/dispatchedAt (the Node-side dispatch claim
+        # markers) are NOT expected to survive past this point -- the final
+        # success write replaces the whole provisioning object rather than
+        # spreading it, and by the time status is 'provisioned', Node's
+        # reconciliation logic (which only ever runs while status is still
+        # 'provisioning') has already stopped looking at them. Their job is
+        # done by the time this write happens.
+
+    def test_manual_recovery_from_provisioning_dispatch_failed_is_accepted(self):
+        """A tenant stuck in provisioning_dispatch_failed (the automatic
+        trigger could not confirm its GitHub dispatch was received) must be
+        a valid manual `operation=provision` recovery entry point, exactly
+        like provisioning_failed already is."""
+        self.fake_store.approve(TENANT_A, [
+            ("accounts/1/locations/1", "Restaurant A", "1 Main St, Springfield"),
+        ])
+        config = self.fake_store.get(TENANT_A)
+        self.fake_store.upsert(TENANT_A, {
+            "status": "provisioning_dispatch_failed",
+            "provisioning": {**config["provisioning"], "lastError": "dispatch could not be confirmed"},
+        }, expected_version=config["configVersion"])
+
+        result = pt.provision_tenant(TENANT_A)
+        self.assertEqual(result["outcome"], "provisioned")
+        final = self.fake_store.get(TENANT_A)
+        self.assertEqual(final["status"], "provisioned")
+        self.assertIsNone(final["provisioning"]["lastError"], "a successful recovery must clear the prior dispatch-failure error")
+
     def test_no_fabricated_review_statistics(self):
         self.fake_store.approve(TENANT_A, [("accounts/1/locations/1", "Restaurant A", "")])
         result = pt.provision_tenant(TENANT_A)

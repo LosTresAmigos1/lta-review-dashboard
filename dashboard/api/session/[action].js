@@ -18,7 +18,7 @@ import { enforceRateLimit } from '../_lib/rateLimit.js'
 import { touchLastLogin, updateUser, upsertUser, UserStoreUnavailableError, lookupTenantIdForUserId } from '../_lib/userStore.js'
 import { appendAuditEntry } from '../_lib/auditLog.js'
 import { resolveTenantId, resolveBootstrapTenantId, TenantResolutionError, DEFAULT_TENANT_ID } from '../_lib/tenants.js'
-import { getTenantConfig, TenantConfigStoreUnavailableError } from '../_lib/tenantConfigStore.js'
+import { getTenantConfig, TenantConfigStoreUnavailableError, reconcileStuckProvisioningDispatch } from '../_lib/tenantConfigStore.js'
 import {
   consumeInviteToken, markInviteConsumedPending, clearInviteConsumedPending, peekInviteToken,
   createResetToken, consumeResetToken, markResetConsumedPending, clearResetConsumedPending, peekResetToken,
@@ -221,6 +221,23 @@ async function tenantStatus(req, res) {
       tenantId, status: 'onboarding', displayName: tenantId, logoUrl: null, brands: [],
       approvedLocations: [], provisioning: null, initialSync: null, entitlementChange: null,
     })
+  }
+
+  // Multi-Tenant Phase 4O: lazy reconciliation for the automatic
+  // post-approval provisioning trigger -- opportunistic, not a new
+  // polling/cron mechanism, since this exact endpoint is already the one
+  // useTenantStatus() polls throughout onboarding. A no-op for every
+  // tenant not currently sitting in an ambiguous, timed-out dispatch
+  // state -- see tenantConfigStore.js's reconcileStuckProvisioningDispatch()
+  // for the full no-op/timeout logic. Never throws (a store outage here
+  // must not break an ordinary status read); if it fails, this read just
+  // serves the config it already has.
+  if (config.status === 'provisioning') {
+    try {
+      config = (await reconcileStuckProvisioningDispatch(tenantId)) ?? config
+    } catch (err) {
+      console.error(`[tenantStatus] reconciliation check failed for ${tenantId}: ${err.message}`)
+    }
   }
 
   return res.status(200).json({

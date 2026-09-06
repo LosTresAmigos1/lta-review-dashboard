@@ -47,7 +47,7 @@ function testRendersBasedOnBackendStatusNotLocalState() {
   // driving the Ready step.
   assert(/const status = tenantStatus\.status/.test(content), 'must derive the rendered step directly from the backend\'s own tenantStatus.status')
   assert(!/useState\(false\)[\s\S]{0,80}(complete|done|finished|active)/i.test(content), 'must never track onboarding completion as invented local component state')
-  for (const s of ['onboarding', 'locations_approved', 'provisioning', 'provisioning_failed', 'provisioned', 'initial_sync', 'initial_sync_failed', 'active', 'suspended']) {
+  for (const s of ['onboarding', 'locations_approved', 'provisioning', 'provisioning_dispatch_failed', 'provisioning_failed', 'provisioned', 'initial_sync', 'initial_sync_failed', 'active', 'suspended']) {
     assert(content.includes(`'${s}'`), `must render a distinct branch for backend status '${s}'`)
   }
 }
@@ -77,8 +77,16 @@ function testNoLocationsDiscoveredIsADistinctState() {
 }
 
 function testFailureStatesAreVisibleAndRetryableWithoutASelfServiceTrigger() {
+  assert(/provisioning_dispatch_failed/.test(content) && /FailedStep/.test(content), 'provisioning_dispatch_failed must render a distinct, visible failure step')
   assert(/provisioning_failed/.test(content) && /FailedStep/.test(content), 'provisioning_failed must render a distinct, visible failure step')
   assert(/initial_sync_failed/.test(content) && /FailedStep/.test(content), 'initial_sync_failed must render a distinct, visible failure step')
+  // provisioning_dispatch_failed (the dispatch itself never landed) and
+  // provisioning_failed (provisioning genuinely ran and failed) are
+  // distinct failure modes -- Phase 4O requires the copy to distinguish
+  // them ("couldn't start" vs "couldn't complete"), not collapse them into
+  // one generic message.
+  assert(/couldn't start/i.test(content), 'provisioning_dispatch_failed must use distinct copy from provisioning_failed ("couldn\'t start" vs "couldn\'t complete")')
+  assert(/couldn't complete/i.test(content), 'provisioning_failed/initial_sync_failed must use "couldn\'t complete" copy, distinct from a dispatch that never started')
   assert(/onRefresh=\{refetch\}/.test(content), 'failure/waiting steps must offer a status re-check (refetch), never a silent dead end')
   // "Retryable" here means re-checking status, never re-triggering
   // provisioning/sync directly -- Phase 4H.1's GitHub-Actions-only dispatch

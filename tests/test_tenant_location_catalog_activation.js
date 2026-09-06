@@ -77,6 +77,26 @@ function fakeHashRedis() {
     hgetall: async (key) => ({ ...(store[key] ?? {}) }),
     hset: async (key, fields) => { store[key] = { ...(store[key] ?? {}), ...fields } },
     hdel: async (key, field) => { if (store[key]) delete store[key][field] },
+    // Multi-Tenant Phase 4O: approveLocations() now CAS-claims 'provisioning'
+    // via markTenantProvisioningDispatched(), which requires client.eval --
+    // faithfully emulates tenantConfigStore.js's CAS_UPSERT_SCRIPT
+    // (HGET/compare-configVersion/HSET), mirroring
+    // test_tenant_entitlement_change.js's own fake exactly.
+    eval: async (_script, keys, args) => {
+      const key = keys[0]
+      const [field, expectedVersionStr, nextJson] = args
+      const raw = store[key]?.[field] ?? null
+      let currentVersion = '0'
+      if (raw) {
+        try {
+          const decoded = JSON.parse(raw)
+          if (decoded && decoded.configVersion !== undefined) currentVersion = String(decoded.configVersion)
+        } catch { /* treat as version 0 */ }
+      }
+      if (currentVersion !== expectedVersionStr) return raw ?? false
+      store[key] = { ...(store[key] ?? {}), [field]: nextJson }
+      return true
+    },
   }
 }
 
@@ -228,7 +248,18 @@ async function testTenantCanBecomeCatalogEnabledWithoutSourceChange() {
   // locations were approved (see tenants.js's tenantOwnsLocationCatalog()).
   assert(!(await ownsCatalog(TENANT_B)), 'approval alone must NOT yet grant catalog ownership -- provisioning is a separate, later step')
   const configAfterApproval = await getTenantConfig(TENANT_B)
-  assert(configAfterApproval.status === 'locations_approved', `expected status 'locations_approved' after approval, got ${configAfterApproval.status}`)
+  // Multi-Tenant Phase 4O: approveLocations() now automatically CAS-claims
+  // 'provisioning' and dispatches it server-side in the same request -- see
+  // triggerAutomaticProvisioning() in google/[action].js. TENANT_PROVISIONING_
+  // DISPATCH_PAT is never set in this test file, so the dispatch itself comes
+  // back 'ambiguous' (never calls fetch), but the CAS claim to 'provisioning'
+  // happens unconditionally BEFORE that dispatch attempt -- status has
+  // already moved on by the time this response is observed.
+  assert(configAfterApproval.status === 'provisioning', `expected status 'provisioning' after automatic Phase 4O dispatch, got ${configAfterApproval.status}`)
+  assert(typeof configAfterApproval.provisioning?.dispatchAttemptId === 'string' && configAfterApproval.provisioning.dispatchAttemptId,
+    'the automatic dispatch claim must stamp a dispatchAttemptId')
+  assert(typeof configAfterApproval.provisioning?.dispatchedAt === 'string' && configAfterApproval.provisioning.dispatchedAt,
+    'the automatic dispatch claim must stamp dispatchedAt')
 
   // Simulates provision_tenant.py (Python) completing successfully -- the
   // real provisioning logic and its own adversarial suite live in
@@ -325,7 +356,11 @@ async function testForgedTenantIdCannotActivateAnotherTenant() {
   assert(approveRes.body.tenantId === TENANT_B, 'activation must be recorded against the AUTHENTICATED tenant, never the forged one')
 
   const tenantBConfig = await getTenantConfig(TENANT_B)
-  assert(tenantBConfig.status === 'locations_approved', 'TENANT_B must be the one whose approval was actually recorded')
+  // Multi-Tenant Phase 4O: see the comment in
+  // testTenantCanBecomeCatalogEnabledWithoutSourceChange() above -- a real
+  // approveLocations() call now automatically advances status to
+  // 'provisioning' in the same request.
+  assert(tenantBConfig.status === 'provisioning', 'TENANT_B must be the one whose approval was actually recorded, and must have automatically advanced to provisioning')
   const ltaConfig = await getTenantConfig(DEFAULT_TENANT_ID)
   assert(ltaConfig === null, 'Los Tres Amigos\'s config record must be completely untouched by a forged tenantId in Tenant B\'s request')
 }

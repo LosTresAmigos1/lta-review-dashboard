@@ -17,15 +17,22 @@ import Button from '../components/ui/Button.jsx'
 // for as long as tenantStatus.status says so, regardless of connection
 // state.
 //
-// Provisioning and Initial Sync are NOT triggered from this UI at all --
-// per Phase 4H.1's established architecture, those are dispatched by a
-// human platform operator via .github/workflows/tenant-lifecycle.yml
-// (confirmation-gated GitHub Actions), never by a tenant-facing control.
-// This component's ENTIRE job during those two states is to poll and
-// display status (useTenantStatus()'s refetchInterval) -- there is no
+// Provisioning and Initial Sync are NOT triggered from THIS UI, and never
+// from any client-controlled input -- per Multi-Tenant Phase 4O, they are
+// triggered automatically, server-side, by
+// google/[action].js's approveLocations() (provisioning) and by GitHub
+// Actions' own internal chaining (Initial Sync, dispatched by the
+// pinned .github/workflows/tenant-lifecycle-dispatch.yml on `main` once
+// provisioning genuinely succeeds) -- never by anything this component
+// does. Before Phase 4O, both were dispatched manually by a human
+// platform operator; that pinned dispatcher remains fully available as an
+// operator recovery path for any of the failure states below. This
+// component's ENTIRE job during every waiting/failure state is to poll
+// and display status (useTenantStatus()'s refetchInterval) -- there is no
 // "Retry" button that re-triggers anything server-side; "retryable" here
 // means the failure is clearly explained and the user can re-check status
-// on demand (a plain refetch), never a hidden self-service dispatcher.
+// on demand (a plain refetch) while the platform (or an operator) recovers
+// it, never a hidden self-service dispatcher.
 
 const STEP_ORDER = ['connect', 'discover', 'approve', 'provisioning', 'initial_sync', 'ready']
 
@@ -285,23 +292,29 @@ export default function Onboarding() {
     return <DiscoverApproveStep isOwner={isOwner} />
   }
 
+  // Multi-Tenant Phase 4O: locations_approved and provisioning are now
+  // reachable as genuinely DIFFERENT moments (approval was just recorded
+  // vs. a real GitHub Actions provisioning run is actually under way --
+  // see approveLocations()'s automatic dispatch trigger), so they get
+  // distinct copy instead of the identical text both used before this
+  // phase (when 'provisioning' was an unreachable, reserved-but-unused
+  // status).
   if (status === 'locations_approved') {
-    return <WaitingStep step="provisioning" title="Setting up your account"
-      message="Your locations are approved. We're setting up your account's storage now -- this usually only takes a few minutes." onRefresh={refetch} />
+    return <WaitingStep step="provisioning" title="Preparing your account"
+      message="Your locations are approved. We're getting ready to set up your account -- this should only take a moment." onRefresh={refetch} />
   }
   if (status === 'provisioning') {
     return <WaitingStep step="provisioning" title="Setting up your account"
       message="We're setting up your account's storage now -- this usually only takes a few minutes." onRefresh={refetch} />
   }
+  if (status === 'provisioning_dispatch_failed') {
+    return <FailedStep step="provisioning" title="Setup couldn't start" lastError={tenantStatus.provisioning?.lastError} onRefresh={refetch} />
+  }
   if (status === 'provisioning_failed') {
     return <FailedStep step="provisioning" title="Setup couldn't complete" lastError={tenantStatus.provisioning?.lastError} onRefresh={refetch} />
   }
-  if (status === 'provisioned') {
-    return <WaitingStep step="initial_sync" title="Syncing your reviews"
-      message="We're pulling in your reviews from Google now -- this usually only takes a few minutes." onRefresh={refetch} />
-  }
-  if (status === 'initial_sync') {
-    return <WaitingStep step="initial_sync" title="Syncing your reviews"
+  if (status === 'provisioned' || status === 'initial_sync') {
+    return <WaitingStep step="initial_sync" title="Importing your reviews"
       message="We're pulling in your reviews from Google now -- this usually only takes a few minutes." onRefresh={refetch} />
   }
   if (status === 'initial_sync_failed') {

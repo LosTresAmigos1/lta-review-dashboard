@@ -100,6 +100,7 @@ const TESTS = [
   'test_tenant_private_data_isolation.js',
   'test_tenant_location_catalog_isolation.js',
   'test_tenant_location_catalog_activation.js',
+  'test_phase4o_automatic_provisioning.js',
   'test_tenant_location_ownership.js',
   'test_tenant_location_catalog_concurrency.js',
   'test_tenant_config_cross_language_consistency.js',

@@ -173,7 +173,20 @@ def _slugify(name: str) -> str:
 # Step 1: load + validate tenant_config state (no Blob access yet)
 # ---------------------------------------------------------------------------
 
-_PROVISIONABLE_STATUSES = {"locations_approved", "provisioning", "provisioning_failed", "provisioned", "active"}
+# Multi-Tenant Phase 4O -- 'provisioning_dispatch_failed' added: the
+# automatic post-approval trigger (dashboard/api/google/[action].js's
+# approveLocations()) CAS-claims 'provisioning' itself BEFORE dispatching
+# this script, and marks 'provisioning_dispatch_failed' if the dispatch
+# itself could not be confirmed (see that file's dispatch-classification
+# logic). A manual `operation=provision` recovery dispatch against a
+# tenant stuck there must be accepted, not rejected -- this script's own
+# entry logic and first write (both below) are otherwise UNCHANGED: it
+# already accepted 'provisioning' itself as a normal, re-entrant entry
+# point before this phase, precisely so an automatic trigger landing here
+# was always safe.
+_PROVISIONABLE_STATUSES = {
+    "locations_approved", "provisioning", "provisioning_failed", "provisioning_dispatch_failed", "provisioned", "active",
+}
 
 
 def _load_and_validate_config(tenant_id: str) -> dict:

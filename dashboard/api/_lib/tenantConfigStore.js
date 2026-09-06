@@ -124,6 +124,21 @@ function parseRecord(value) {
 //                           retry starting point, distinct from
 //                           locations_approved so operators/logs can see
 //                           something went wrong
+//   provisioning_dispatch_failed -- Multi-Tenant Phase 4O: the automatic
+//                           post-approval trigger (approveLocations())
+//                           could not confirm its GitHub Actions dispatch
+//                           attempt was received -- either a definite
+//                           rejection (a clean 4xx response) or a
+//                           reconciliation timeout after an ambiguous
+//                           network failure (see
+//                           reconcileStuckProvisioningDispatch() below).
+//                           Distinct from provisioning_failed, which means
+//                           provision_tenant.py itself ran and failed --
+//                           this means we never confirmed a run started at
+//                           all. A valid manual `operation=provision`
+//                           retry starting point (see provision_tenant.py's
+//                           _PROVISIONABLE_STATUSES, updated in the same
+//                           phase).
 //   suspended            -- unchanged, admin-superseding state. A stale
 //                           Initial Sync attempt that started before a
 //                           suspension can never overwrite it -- see the
@@ -133,7 +148,8 @@ function parseRecord(value) {
 function isValidStatus(status) {
   return [
     'onboarding', 'locations_approved', 'provisioning', 'provisioned',
-    'initial_sync', 'active', 'initial_sync_failed', 'provisioning_failed', 'suspended',
+    'initial_sync', 'active', 'initial_sync_failed', 'provisioning_failed',
+    'provisioning_dispatch_failed', 'suspended',
   ].includes(status)
 }
 
@@ -607,6 +623,124 @@ export async function markTenantProvisioningFailed(tenantId, errorMessage, { exp
       lastError: String(errorMessage ?? 'unknown error'),
     },
   }, expectedVersion === undefined ? {} : { expectedVersion })
+}
+
+// Multi-Tenant Phase 4O -- automatic post-approval provisioning handoff.
+// The ONE place a tenant's status is allowed to move from
+// locations_approved (or a prior provisioning_failed/
+// provisioning_dispatch_failed retry starting point) to 'provisioning'
+// BEFORE provision_tenant.py has actually run. This IS the exactly-once
+// dispatch CLAIM: google/[action].js's approveLocations() calls this
+// immediately after recordLocationApproval() succeeds, passing the
+// configVersion it just captured as expectedVersion -- only ONE of any
+// concurrent callers can win this CAS, and only the winner proceeds to
+// call GitHub's dispatch API. The resulting 'provisioning' status is the
+// SAME status provision_tenant.py already treats as a normal, re-entrant
+// starting point (confirmed by reading that file's own
+// _PROVISIONABLE_STATUSES directly) -- this was reserved for exactly this
+// purpose, not a new invariant.
+//
+// Stamps dispatchAttemptId/dispatchedAt INSIDE the provisioning object,
+// spreading whatever was already there (never clobbering a previous
+// cycle's lastError/lastAttemptAt) -- provision_tenant.py's own first
+// write (status: 'provisioning', provisioning.status: 'in_progress')
+// spreads the EXISTING provisioning object before overwriting
+// status/lastAttemptAt, so dispatchedAt survives into and past that
+// write. This is what makes reconcileStuckProvisioningDispatch() below
+// possible without any new GitHub-side correlation mechanism: it compares
+// dispatchedAt (stamped here) against lastAttemptAt (stamped by
+// provision_tenant.py's own first write) to answer "did a real run start
+// since I dispatched," never a bare status-string comparison, which would
+// incorrectly treat a STALE 'failed'/'in_progress' left over from a
+// PRIOR cycle as evidence of a NEW run having started.
+export async function markTenantProvisioningDispatched(tenantId, { dispatchAttemptId, expectedVersion } = {}) {
+  if (typeof dispatchAttemptId !== 'string' || !dispatchAttemptId) {
+    throw new TypeError('markTenantProvisioningDispatched: dispatchAttemptId is required')
+  }
+  const existing = await getTenantConfig(tenantId)
+  return upsertTenantConfig(tenantId, {
+    status: 'provisioning',
+    provisioning: {
+      ...(existing?.provisioning ?? {}),
+      dispatchAttemptId,
+      dispatchedAt: new Date().toISOString(),
+    },
+  }, expectedVersion === undefined ? {} : { expectedVersion })
+}
+
+// The ONE place a tenant's status is allowed to become
+// 'provisioning_dispatch_failed' -- used for BOTH a definite dispatch
+// rejection (a clean 4xx response from GitHub's dispatch API, called
+// immediately, no waiting) and a confirmed-no-progress reconciliation
+// timeout (called by reconcileStuckProvisioningDispatch() below, never
+// directly for an ambiguous outcome by itself). Distinct from
+// markTenantProvisioningFailed() -- that status means provision_tenant.py
+// itself ran and failed; this one means we could never even confirm a
+// run started at all.
+export async function markTenantProvisioningDispatchFailed(tenantId, reason, { expectedVersion } = {}) {
+  const existing = await getTenantConfig(tenantId)
+  return upsertTenantConfig(tenantId, {
+    status: 'provisioning_dispatch_failed',
+    provisioning: {
+      ...(existing?.provisioning ?? {}),
+      lastError: String(reason ?? 'dispatch failed'),
+    },
+  }, expectedVersion === undefined ? {} : { expectedVersion })
+}
+
+// Multi-Tenant Phase 4O -- lazy reconciliation for an AMBIGUOUS dispatch
+// outcome (see google/[action].js's dispatchTenantLifecycleWorkflow()): a
+// network timeout or 5xx while calling GitHub's dispatch API can never be
+// treated as definite failure, because the request may already have been
+// accepted server-side with only the RESPONSE lost. Rather than guess,
+// this checks the one durable signal that proves a real run genuinely
+// started: has provisioning.lastAttemptAt (written by
+// provision_tenant.py's own first CAS write, the moment it actually
+// begins) become NEWER than provisioning.dispatchedAt (stamped by
+// markTenantProvisioningDispatched() above, BEFORE the ambiguous call)?
+// If yes, a real run started at or after our dispatch attempt -- resolved
+// as success, nothing to do. If a bounded timeout elapses with no such
+// progress, only THEN is it safe to conclude the dispatch never reached
+// GitHub (or never resulted in a run) and mark the tenant recoverable.
+//
+// Called opportunistically from session/[action].js's tenantStatus() on
+// every read -- no new polling/cron infrastructure needed, since the
+// frontend (Onboarding.jsx, via useTenantStatus()) is already polling
+// this exact endpoint throughout onboarding. Deliberately conservative:
+// returns the config UNCHANGED (a silent no-op) whenever status is no
+// longer 'provisioning' at all, dispatchedAt is missing (dispatched by
+// something other than this automatic path, e.g. a manual operator
+// retry, which owns its own recovery story), or the timeout hasn't
+// elapsed yet -- this must never downgrade a genuinely in-progress or
+// already-resolved tenant.
+const RECONCILIATION_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes -- generous for GitHub Actions runner cold-start
+
+export async function reconcileStuckProvisioningDispatch(tenantId) {
+  const config = await getTenantConfig(tenantId)
+  if (!config || config.status !== 'provisioning') return config
+
+  const dispatchedAt = config.provisioning?.dispatchedAt
+  if (!dispatchedAt) return config
+
+  const dispatchedAtMs = new Date(dispatchedAt).getTime()
+  const lastAttemptAt = config.provisioning?.lastAttemptAt
+  const lastAttemptAtMs = lastAttemptAt ? new Date(lastAttemptAt).getTime() : null
+  const progressed = lastAttemptAtMs !== null && lastAttemptAtMs >= dispatchedAtMs
+  if (progressed) return config
+
+  const age = Date.now() - dispatchedAtMs
+  if (age < RECONCILIATION_TIMEOUT_MS) return config
+
+  try {
+    return await markTenantProvisioningDispatchFailed(
+      tenantId,
+      'No provisioning progress was observed within the reconciliation timeout after dispatch -- the GitHub Actions dispatch call may not have been received.',
+      { expectedVersion: config.configVersion }
+    )
+  } catch (err) {
+    if (err instanceof ConfigVersionConflictError) return getTenantConfig(tenantId) // something else already resolved it -- return the fresh state
+    throw err
+  }
 }
 
 // Multi-Tenant Phase 4G -- the ONE place a tenant's status is allowed to

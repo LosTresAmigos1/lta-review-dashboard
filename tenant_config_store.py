@@ -67,9 +67,17 @@ TENANT_CONFIG_KEY = "tenant_config:v1"
 # between 'provisioned' and 'active' -- see initial_sync.py's header. Only
 # initial_sync.py's upsert_tenant_config() calls are ever allowed to write
 # 'active'.
+# Multi-Tenant Phase 4O: 'provisioning_dispatch_failed' added -- the
+# automatic post-approval trigger (Node) writes this when a GitHub Actions
+# dispatch attempt could not be confirmed (definite rejection, or a
+# reconciliation timeout after an ambiguous network failure); distinct
+# from 'provisioning_failed', which means provision_tenant.py itself ran
+# and failed. See dashboard/api/_lib/tenantConfigStore.js's mirror of this
+# same enum and provision_tenant.py's _PROVISIONABLE_STATUSES.
 _VALID_STATUSES = {
     "onboarding", "locations_approved", "provisioning", "provisioned",
-    "initial_sync", "active", "initial_sync_failed", "provisioning_failed", "suspended",
+    "initial_sync", "active", "initial_sync_failed", "provisioning_failed",
+    "provisioning_dispatch_failed", "suspended",
 }
 
 # Multi-Tenant Phase 4F.1 -- mirrors tenantConfigStore.js's
