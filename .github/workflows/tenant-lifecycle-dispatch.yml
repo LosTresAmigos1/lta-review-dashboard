@@ -97,6 +97,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: write  # TEMPORARY, for a one-time live self-dispatch smoke test -- see the "TEMP self-chain test" step below.
 
 env:
   PINNED_LIFECYCLE_SHA: 64fa6a38d3106fda60e110af843af841807aed93
@@ -219,12 +220,47 @@ jobs:
       # never needs CREDENTIAL_ENCRYPTION_KEY, Google secrets, or Blob
       # secrets at all.
       - name: Credential key/schema audit
+        id: credential_key_audit
         if: inputs.operation == 'credential_key_audit'
         env:
           TENANT_ID: ${{ inputs.tenant_id }}
           UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
         run: python redis_credential_key_audit.py --tenant-id "$TENANT_ID"
+
+      # TEMPORARY -- one-time live smoke test for Multi-Tenant Phase 4O's
+      # GitHub self-chaining design (provisioning -> Initial Sync). Proves,
+      # with zero tenant-state risk: (1) this workflow's own ambient
+      # GITHUB_TOKEN, with `permissions: actions: write` added above, can
+      # successfully dispatch ANOTHER run of this SAME workflow file; (2)
+      # that second run queues under the SAME per-tenant concurrency group
+      # rather than racing it; (3) THIS run does not block/wait for the
+      # second run to start or finish. Chains off credential_key_audit
+      # (read-only, harmless) into a SEPARATE run of redis_identity_probe
+      # (also read-only, harmless, and has no further chaining of its own
+      # -- deliberately a DIFFERENT operation than this step's trigger, so
+      # there is no possibility of an infinite self-dispatch loop). Remove
+      # this step and the `actions: write` permission comment once the
+      # real provisioning->initial_sync chaining step (gated on
+      # steps.run_provisioning.outcome == 'success') has been added and
+      # this test's results are confirmed.
+      - name: TEMP self-chain test
+        if: inputs.operation == 'credential_key_audit' && steps.credential_key_audit.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TENANT_ID: ${{ inputs.tenant_id }}
+        run: |
+          set -euo pipefail
+          echo "Dispatching a follow-up redis_identity_probe run for tenant=$TENANT_ID using this run's own GITHUB_TOKEN..."
+          gh api --method POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            /repos/${{ github.repository }}/actions/workflows/tenant-lifecycle-dispatch.yml/dispatches \
+            -f ref='main' \
+            -f "inputs[operation]=redis_identity_probe" \
+            -f "inputs[tenant_id]=$TENANT_ID" \
+            -f "inputs[confirmation]=$TENANT_ID"
+          echo "Dispatch call returned (no wait for the second run) -- this step and the job now proceed to finish normally."
 
       # Only reachable when Validate inputs actually succeeded -- the one
       # place production secrets and tenant_status_report.py are used.
